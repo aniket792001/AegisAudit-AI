@@ -24,7 +24,7 @@ class RiskScorer:
     @classmethod
     def calculate_metrics(cls, findings: List[AuditFinding]) -> Dict[str, float]:
         if not findings:
-            return {"score": 0.0, "risk_index": 0.0}
+            return {"score": 0.0, "total_risk_exposure": 0.0}
 
         total_points = sum(cls.WEIGHTS.get(f.status, 0.0) for f in findings)
         max_points = float(len(findings))

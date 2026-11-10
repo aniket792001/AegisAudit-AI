@@ -119,7 +119,9 @@ const INITIAL_DEMO_REPORT = {
 function App() {
   // --- Navigation & Core State ---
   const [activeTab, setActiveTab] = useState('dashboard'); // dashboard | studio | matrix | standards | diff | exports
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    return localStorage.getItem('aegis_sidebar_collapsed') === 'true';
+  });
   const [theme, setTheme] = useState(localStorage.getItem('aegis_theme') || 'dark');
   const [token, setToken] = useState(localStorage.getItem('aegis_token') || '');
   const [user, setUser] = useState({
@@ -127,6 +129,14 @@ function App() {
     email: 'admin@aegisaudit.com',
     role: 'admin'
   });
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('aegis_sidebar_collapsed', String(next));
+      return next;
+    });
+  }, []);
 
   // --- Reports & Matrix State ---
   const [report, setReport] = useState(INITIAL_DEMO_REPORT);
@@ -179,6 +189,29 @@ function App() {
     localStorage.setItem('aegis_theme', theme);
   }, [theme]);
 
+  // Global Keyboard Shortcuts (Ctrl+B sidebar, Escape modal, / search)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      }
+      if (e.key === 'Escape') {
+        setShowAuthModal(false);
+      }
+      if (e.key === '/' && activeTab === 'matrix') {
+        const tag = document.activeElement?.tagName;
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          e.preventDefault();
+          const searchEl = document.querySelector('.search-input');
+          if (searchEl) searchEl.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleSidebar, activeTab]);
+
   // Show Toast Helper
   const showToast = (text, type = 'success') => {
     setToast({ text, type });
@@ -196,32 +229,45 @@ function App() {
     }
   }, [selectedFinding]);
 
-  // --- Initial Data Load ---
+  // --- Initial Data Load & Seamless Onboarding ---
   useEffect(() => {
-    // 1. Check user token
-    if (token) {
+    // Auto-login default admin if no token in session
+    if (!token) {
+      fetch(`${API_BASE}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'admin@aegisaudit.com', password: 'AdminPass123!' })
+      })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data?.access_token) {
+            setToken(data.access_token);
+            setUser(data.user);
+            localStorage.setItem('aegis_token', data.access_token);
+          }
+        })
+        .catch(() => { });
+    } else {
       fetch(`${API_BASE}/api/auth/me`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
-      .then(res => res.ok ? res.json() : null)
-      .then(u => {
-        if (u) setUser(u);
-      })
-      .catch(() => {});
+        .then(res => res.ok ? res.json() : null)
+        .then(u => {
+          if (u) setUser(u);
+        })
+        .catch(() => { });
     }
 
-    // 2. Fetch past audits history
+    // Load history, standards catalog & documents
     loadAuditHistory();
 
-    // 3. Fetch pre-seeded standards catalog
     fetch(`${API_BASE}/api/audit/standards/catalog`)
       .then(res => res.ok ? res.json() : [])
       .then(catalog => {
         setStandardsCatalog(catalog);
       })
-      .catch(() => {});
+      .catch(() => { });
 
-    // 4. Fetch available documents in storage
     fetch(`${API_BASE}/api/documents/list`, {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })
@@ -232,43 +278,46 @@ function App() {
           setSelectedPolicies([docs[0].filename]);
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [token]);
 
   const loadAuditHistory = () => {
     fetch(`${API_BASE}/api/audit/history`, {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })
-    .then(res => res.ok ? res.json() : [])
-    .then(list => {
-      setPastAudits(list);
-      if (list.length > 0) {
-        // Load the first audit into workspace
-        loadReport(list[0].audit_id);
-        if (list.length >= 2) {
-          setDiffBaselineId(list[1].audit_id);
-          setDiffTargetId(list[0].audit_id);
+      .then(res => res.ok ? res.json() : [])
+      .then(list => {
+        setPastAudits(list);
+        if (list.length > 0) {
+          if (!report || report.audit_id === 'AUDIT-ISO27001-DEMO') {
+            loadReport(list[0].audit_id, false);
+          }
+          if (list.length >= 2) {
+            setDiffBaselineId(list[1].audit_id);
+            setDiffTargetId(list[0].audit_id);
+          }
         }
-      }
-    })
-    .catch(() => {});
+      })
+      .catch(() => { });
   };
 
-  const loadReport = (auditId) => {
+  const loadReport = (auditId, notify = true) => {
     fetch(`${API_BASE}/api/audit/${auditId}`, {
       headers: token ? { 'Authorization': `Bearer ${token}` } : {}
     })
-    .then(res => res.ok ? res.json() : null)
-    .then(data => {
-      if (data) {
-        setReport(data);
-        if (data.findings && data.findings.length > 0) {
-          setSelectedFinding(data.findings[0]);
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data) {
+          setReport(data);
+          if (data.findings && data.findings.length > 0) {
+            setSelectedFinding(data.findings[0]);
+          }
+          if (notify) {
+            showToast(`Loaded audit report ${auditId}`, 'info');
+          }
         }
-        showToast(`Loaded audit report ${auditId}`, 'info');
-      }
-    })
-    .catch(err => console.error(err));
+      })
+      .catch(err => console.error(err));
   };
 
   // --- Auth Handlers ---
@@ -422,7 +471,7 @@ function App() {
           if (log.progress_pct) setAuditProgress(log.progress_pct);
           if (log.agent_name) setActiveAgent(log.agent_name);
           if (log.message) setActiveStepTitle(log.message);
-        } catch(err) {}
+        } catch (err) { }
       };
 
       eventSource.addEventListener('end', () => {
@@ -436,18 +485,18 @@ function App() {
         fetch(`${API_BASE}/api/audit/jobs/${jobData.job_id}/status`, {
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         })
-        .then(r => r.json())
-        .then(doneJob => {
-          if (doneJob.result) {
-            setReport(doneJob.result);
-            if (doneJob.result.findings?.length > 0) {
-              setSelectedFinding(doneJob.result.findings[0]);
+          .then(r => r.json())
+          .then(doneJob => {
+            if (doneJob.result) {
+              setReport(doneJob.result);
+              if (doneJob.result.findings?.length > 0) {
+                setSelectedFinding(doneJob.result.findings[0]);
+              }
+              loadAuditHistory();
+              // Switch to findings matrix after a short delay
+              setTimeout(() => setActiveTab('matrix'), 1000);
             }
-            loadAuditHistory();
-            // Switch to findings matrix after a short delay
-            setTimeout(() => setActiveTab('matrix'), 1000);
-          }
-        });
+          });
       });
 
       eventSource.onerror = () => {
@@ -604,12 +653,12 @@ function App() {
               <span className="sidebar-brand-sub">Autonomous GRC</span>
             </div>
           </div>
-          <button 
-            className="sidebar-collapse-btn" 
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            title="Collapse Sidebar"
+          <button
+            className="sidebar-collapse-btn"
+            onClick={toggleSidebar}
+            title={sidebarCollapsed ? "Expand Sidebar (Ctrl+B)" : "Collapse Sidebar (Ctrl+B)"}
           >
-            «
+            {sidebarCollapsed ? '»' : '«'}
           </button>
         </div>
 
@@ -617,9 +666,9 @@ function App() {
         <div className="sidebar-audit-box">
           <div className="sidebar-section-label">Active Audit Session</div>
           {pastAudits.length > 0 ? (
-            <select 
-              className="sidebar-audit-select" 
-              value={report?.audit_id || ''} 
+            <select
+              className="sidebar-audit-select"
+              value={report?.audit_id || ''}
               onChange={(e) => loadReport(e.target.value)}
               title="Switch Active Audit Run"
             >
@@ -640,7 +689,7 @@ function App() {
         <nav className="sidebar-nav">
           <div className="sidebar-nav-heading">Platform</div>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'dashboard' ? 'active' : ''}`}
             onClick={() => setActiveTab('dashboard')}
           >
@@ -651,7 +700,7 @@ function App() {
             <span className="sidebar-nav-badge">{compliancePct}%</span>
           </button>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'studio' ? 'active' : ''}`}
             onClick={() => setActiveTab('studio')}
           >
@@ -662,7 +711,7 @@ function App() {
             {isAuditing && <span className="agent-pulse" style={{ background: '#34D399', width: '8px', height: '8px' }}></span>}
           </button>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'matrix' ? 'active' : ''}`}
             onClick={() => setActiveTab('matrix')}
           >
@@ -675,7 +724,7 @@ function App() {
 
           <div className="sidebar-nav-heading">Intelligence</div>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'standards' ? 'active' : ''}`}
             onClick={() => setActiveTab('standards')}
           >
@@ -686,7 +735,7 @@ function App() {
             <span className="sidebar-nav-badge">{standardsCatalog.length || 4}</span>
           </button>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'diff' ? 'active' : ''}`}
             onClick={() => setActiveTab('diff')}
           >
@@ -696,7 +745,7 @@ function App() {
             </div>
           </button>
 
-          <button 
+          <button
             className={`sidebar-nav-item ${activeTab === 'exports' ? 'active' : ''}`}
             onClick={() => setActiveTab('exports')}
           >
@@ -710,8 +759,8 @@ function App() {
 
         {/* Quick Launch CTA */}
         <div className="sidebar-action-box">
-          <button 
-            className="btn btn-primary" 
+          <button
+            className="btn btn-primary"
             style={{ width: '100%', justifyContent: 'center', padding: '10px 14px', fontSize: '0.85rem' }}
             onClick={() => setActiveTab('studio')}
             disabled={user?.role === 'viewer'}
@@ -735,8 +784,8 @@ function App() {
                   <span className="user-role-badge">{user.role}</span>
                 </div>
               </div>
-              <button 
-                className="btn btn-ghost" 
+              <button
+                className="btn btn-ghost"
                 onClick={handleLogout}
                 title="Sign Out"
                 style={{ padding: '4px 8px', fontSize: '0.85rem', color: 'var(--text-dim)' }}
@@ -745,17 +794,17 @@ function App() {
               </button>
             </div>
           ) : (
-            <button 
-              className="btn btn-secondary" 
-              style={{ width: '100%', justifyContent: 'center' }} 
+            <button
+              className="btn btn-secondary"
+              style={{ width: '100%', justifyContent: 'center' }}
               onClick={() => setShowAuthModal(true)}
             >
               🔐 Sign In to Workspace
             </button>
           )}
 
-          <button 
-            className="btn btn-secondary theme-toggle-btn" 
+          <button
+            className="btn btn-secondary theme-toggle-btn"
             style={{ width: '100%', justifyContent: 'center', fontSize: '0.80rem', padding: '8px 12px' }}
             onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
             title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
@@ -771,10 +820,10 @@ function App() {
         {/* Dynamic Context Topbar */}
         <header className="viewport-topbar">
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            <button 
-              className="topbar-collapse-btn" 
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              title={sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
+            <button
+              className="topbar-collapse-btn"
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "Expand Sidebar (Ctrl+B)" : "Collapse Sidebar (Ctrl+B)"}
             >
               {sidebarCollapsed ? '☰' : '⇤'}
             </button>
@@ -805,6 +854,15 @@ function App() {
               <span className="badge badge-compliant" style={{ fontSize: '0.70rem', padding: '2px 8px' }}>{compliancePct}%</span>
             </div>
 
+            <button
+              className="btn btn-secondary"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              style={{ padding: '7px 10px', fontSize: '0.88rem' }}
+            >
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
+
             {activeTab === 'dashboard' && (
               <button className="btn btn-secondary" onClick={() => triggerDownload('pdf')} style={{ padding: '7px 14px', fontSize: '0.82rem' }}>
                 📄 Export PDF
@@ -827,1110 +885,1131 @@ function App() {
 
         {/* MAIN APPLICATION VIEWPORT CONTENT */}
         <main className={activeTab === 'matrix' ? 'viewport-content-matrix' : 'viewport-content'}>
-        
-        {/* =========================================================================
+
+          {/* =========================================================================
             VIEW 1: EXECUTIVE DASHBOARD (REDESIGNED FOR CLEAN SPACING & CONSISTENCY)
             ========================================================================= */}
-        {activeTab === 'dashboard' && (
-          <div className="view-container">
-            
-            {/* 1. Hero Compliance Posture Card */}
-            <div className="dashboard-hero-card">
-              <div className="dashboard-hero-main">
-                {/* SVG Donut Health Gauge */}
-                <div style={{ position: 'relative', width: '120px', height: '120px', flexShrink: 0 }}>
-                  <svg viewBox="0 0 100 100" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
-                    <circle cx="50" cy="50" r="42" fill="transparent" stroke="var(--border-subtle)" strokeWidth="10" />
-                    <circle 
-                      cx="50" 
-                      cy="50" 
-                      r="42" 
-                      fill="transparent" 
-                      stroke={compliancePct >= 75 ? 'var(--status-compliant)' : compliancePct >= 50 ? 'var(--status-partial)' : 'var(--status-non-compliant)'}
-                      strokeWidth="10" 
-                      strokeDasharray="264" 
-                      strokeDashoffset={264 - (264 * (compliancePct / 100))}
-                      strokeLinecap="round" 
-                      style={{ transition: 'stroke-dashoffset 0.8s ease' }}
-                    />
-                  </svg>
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-                    <span style={{ fontSize: '1.65rem', fontWeight: 800, fontFamily: 'var(--font-mono)', color: 'var(--text-main)', lineHeight: 1 }}>
-                      {compliancePct}%
-                    </span>
-                    <span style={{ fontSize: '0.62rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--accent-cyan-light)', letterSpacing: '0.05em', marginTop: '3px' }}>
-                      Audit Score
-                    </span>
-                  </div>
-                </div>
+          {activeTab === 'dashboard' && (
+            <div className="view-container">
 
-                {/* Narrative & Standard Context */}
-                <div className="dashboard-hero-narrative">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                    <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
-                      Regulatory Compliance Posture
-                    </h2>
-                    <span className="badge badge-compliant" style={{ fontFamily: 'var(--font-mono)' }}>
-                      ID: {report.audit_id}
-                    </span>
-                    <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', border: '1px solid var(--border-subtle)' }}>
-                      {report.standard_name.replace('.pdf', '').replace('.txt', '')}
-                    </span>
-                  </div>
-                  <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: '1.55', margin: 0 }}>
-                    {report?.summary?.executive_overview || 'Comprehensive evaluation completed. Controls have been audited against evidence extractions with cryptographic verification.'}
-                  </p>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-                    <span>Audited Corpus:</span>
-                    <strong style={{ color: 'var(--text-main)' }}>{report.policy_name}</strong>
-                    <span>•</span>
-                    <span>Last run: {report.timestamp}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="dashboard-hero-actions">
-                <button className="btn btn-primary" onClick={() => setActiveTab('matrix')} style={{ justifyContent: 'center' }}>
-                  📋 Inspect Findings Matrix
-                </button>
-                <button className="btn btn-secondary" onClick={() => triggerDownload('pdf')} style={{ justifyContent: 'center' }}>
-                  📄 Export Signed PDF
-                </button>
-                <button className="btn btn-secondary" onClick={() => triggerDownload('tasks')} style={{ justifyContent: 'center' }}>
-                  🎯 Export Jira Remediation Tasks
-                </button>
-              </div>
-            </div>
-
-            {/* 2. Four Unified KPI Cards */}
-            <div className="kpi-grid">
-              <div className="kpi-stat-card">
-                <div className="kpi-top-row">
-                  <span className="kpi-title">Overall Compliance</span>
-                  <span className="kpi-icon">📊</span>
-                </div>
-                <div className="kpi-val-row">
-                  <span className="kpi-num" style={{ color: compliancePct >= 75 ? 'var(--status-compliant)' : 'var(--status-partial)' }}>
-                    {compliancePct}%
-                  </span>
-                  <span className="badge badge-compliant" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>Ready</span>
-                </div>
-                <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
-                  <div className="progress-bar-fill" style={{ width: `${compliancePct}%` }}></div>
-                </div>
-                <div className="kpi-subtext">Calculated across {report.summary?.total_clauses_audited || 0} evaluated controls</div>
-              </div>
-
-              <div className="kpi-stat-card">
-                <div className="kpi-top-row">
-                  <span className="kpi-title">Compliant Controls</span>
-                  <span className="kpi-icon">🟢</span>
-                </div>
-                <div className="kpi-val-row">
-                  <span className="kpi-num" style={{ color: 'var(--status-compliant)' }}>{compliantCount}</span>
-                  <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>/ {report.summary?.total_clauses_audited || 0}</span>
-                </div>
-                <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
-                  <div className="progress-bar-fill" style={{ width: `${((compliantCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-compliant)' }}></div>
-                </div>
-                <div className="kpi-subtext">Fully validated against policy evidence</div>
-              </div>
-
-              <div className="kpi-stat-card">
-                <div className="kpi-top-row">
-                  <span className="kpi-title">Partial / Ambiguous</span>
-                  <span className="kpi-icon">🟡</span>
-                </div>
-                <div className="kpi-val-row">
-                  <span className="kpi-num" style={{ color: 'var(--status-partial)' }}>{partialCount}</span>
-                  <span className="badge badge-partial" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>In Review</span>
-                </div>
-                <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
-                  <div className="progress-bar-fill" style={{ width: `${((partialCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-partial)' }}></div>
-                </div>
-                <div className="kpi-subtext">Compensating controls or documentation needed</div>
-              </div>
-
-              <div className="kpi-stat-card">
-                <div className="kpi-top-row">
-                  <span className="kpi-title">Critical & High Gaps</span>
-                  <span className="kpi-icon">🔴</span>
-                </div>
-                <div className="kpi-val-row">
-                  <span className="kpi-num" style={{ color: 'var(--status-non-compliant)' }}>{gapCount}</span>
-                  <span className="badge badge-non-compliant" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>Action Req.</span>
-                </div>
-                <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
-                  <div className="progress-bar-fill" style={{ width: `${((gapCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-non-compliant)' }}></div>
-                </div>
-                <div className="kpi-subtext">Immediate remediation workflow assigned</div>
-              </div>
-            </div>
-
-            {/* 3. Balanced 2-Column Analytical Section */}
-            <div className="dashboard-split-grid">
-              
-              {/* Left Column: Risk Severity Breakdown */}
-              <div className="dashboard-card">
-                <div className="dashboard-card-header">
-                  <div className="dashboard-card-title">
-                    <span>🎯</span> Risk Severity Breakdown
-                  </div>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontWeight: 600 }}>By Impact Level</span>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {[
-                    { label: 'Critical Risk Gaps', count: report.summary?.risk_breakdown?.Critical || 1, color: '#EF4444', desc: 'Direct regulatory exposure; SCIM de-provisioning, root credentials' },
-                    { label: 'High Risk Gaps', count: report.summary?.risk_breakdown?.High || 1, color: '#F59E0B', desc: 'Missing hardware MFA or network segmentation' },
-                    { label: 'Medium Risk Items', count: report.summary?.risk_breakdown?.Medium || 1, color: '#EAB308', desc: 'Tabletop breach drills, logging latency review' },
-                    { label: 'Low Risk / Compliant', count: report.summary?.risk_breakdown?.Low || 3, color: '#10B981', desc: 'Cryptographic key rotation, SIEM retention alignment' },
-                  ].map(r => (
-                    <div key={r.label} className="severity-row">
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: r.color }}></span>
-                          <span style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-main)' }}>{r.label}</span>
-                        </div>
-                        <span style={{ fontSize: '0.74rem', color: 'var(--text-dim)', marginLeft: '16px' }}>{r.desc}</span>
-                      </div>
-                      <span style={{ fontSize: '1.2rem', fontWeight: 800, color: r.color, fontFamily: 'var(--font-mono)' }}>
-                        {r.count}
+              {/* 1. Hero Compliance Posture Card */}
+              <div className="dashboard-hero-card">
+                <div className="dashboard-hero-main">
+                  {/* SVG Donut Health Gauge */}
+                  <div style={{ position: 'relative', width: '120px', height: '120px', flexShrink: 0 }}>
+                    <svg viewBox="0 0 100 100" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
+                      <circle cx="50" cy="50" r="42" fill="transparent" stroke="var(--border-subtle)" strokeWidth="10" />
+                      <circle
+                        cx="50"
+                        cy="50"
+                        r="42"
+                        fill="transparent"
+                        stroke={compliancePct >= 75 ? 'var(--status-compliant)' : compliancePct >= 50 ? 'var(--status-partial)' : 'var(--status-non-compliant)'}
+                        strokeWidth="10"
+                        strokeDasharray="264"
+                        strokeDashoffset={264 - (264 * (compliancePct / 100))}
+                        strokeLinecap="round"
+                        style={{ transition: 'stroke-dashoffset 0.8s ease' }}
+                      />
+                    </svg>
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                      <span style={{ fontSize: '1.65rem', fontWeight: 800, fontFamily: 'var(--font-mono)', color: 'var(--text-main)', lineHeight: 1 }}>
+                        {compliancePct}%
+                      </span>
+                      <span style={{ fontSize: '0.62rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--accent-cyan-light)', letterSpacing: '0.05em', marginTop: '3px' }}>
+                        Audit Score
                       </span>
                     </div>
-                  ))}
+                  </div>
+
+                  {/* Narrative & Standard Context */}
+                  <div className="dashboard-hero-narrative">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                      <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
+                        Regulatory Compliance Posture
+                      </h2>
+                      <span className="badge badge-compliant" style={{ fontFamily: 'var(--font-mono)' }}>
+                        ID: {report.audit_id}
+                      </span>
+                      <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', border: '1px solid var(--border-subtle)' }}>
+                        {report.standard_name.replace('.pdf', '').replace('.txt', '')}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: '1.55', margin: 0 }}>
+                      {report?.summary?.executive_overview || 'Comprehensive evaluation completed. Controls have been audited against evidence extractions with cryptographic verification.'}
+                    </p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: 'var(--text-dim)' }}>
+                      <span>Audited Corpus:</span>
+                      <strong style={{ color: 'var(--text-main)' }}>{report.policy_name}</strong>
+                      <span>•</span>
+                      <span>Last run: {report.timestamp}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="dashboard-hero-actions">
+                  <button className="btn btn-primary" onClick={() => setActiveTab('matrix')} style={{ justifyContent: 'center' }}>
+                    📋 Inspect Findings Matrix
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => triggerDownload('pdf')} style={{ justifyContent: 'center' }}>
+                    📄 Export Signed PDF
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => triggerDownload('tasks')} style={{ justifyContent: 'center' }}>
+                    🎯 Export Jira Remediation Tasks
+                  </button>
                 </div>
               </div>
 
-              {/* Right Column: Top High-Priority Audit Findings */}
+              {/* 2. Four Unified KPI Cards */}
+              <div className="kpi-grid">
+                <div className="kpi-stat-card">
+                  <div className="kpi-top-row">
+                    <span className="kpi-title">Overall Compliance</span>
+                    <span className="kpi-icon">📊</span>
+                  </div>
+                  <div className="kpi-val-row">
+                    <span className="kpi-num" style={{ color: compliancePct >= 75 ? 'var(--status-compliant)' : 'var(--status-partial)' }}>
+                      {compliancePct}%
+                    </span>
+                    <span className="badge badge-compliant" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>Ready</span>
+                  </div>
+                  <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
+                    <div className="progress-bar-fill" style={{ width: `${compliancePct}%` }}></div>
+                  </div>
+                  <div className="kpi-subtext">Calculated across {report.summary?.total_clauses_audited || 0} evaluated controls</div>
+                </div>
+
+                <div className="kpi-stat-card">
+                  <div className="kpi-top-row">
+                    <span className="kpi-title">Compliant Controls</span>
+                    <span className="kpi-icon">🟢</span>
+                  </div>
+                  <div className="kpi-val-row">
+                    <span className="kpi-num" style={{ color: 'var(--status-compliant)' }}>{compliantCount}</span>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>/ {report.summary?.total_clauses_audited || 0}</span>
+                  </div>
+                  <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
+                    <div className="progress-bar-fill" style={{ width: `${((compliantCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-compliant)' }}></div>
+                  </div>
+                  <div className="kpi-subtext">Fully validated against policy evidence</div>
+                </div>
+
+                <div className="kpi-stat-card">
+                  <div className="kpi-top-row">
+                    <span className="kpi-title">Partial / Ambiguous</span>
+                    <span className="kpi-icon">🟡</span>
+                  </div>
+                  <div className="kpi-val-row">
+                    <span className="kpi-num" style={{ color: 'var(--status-partial)' }}>{partialCount}</span>
+                    <span className="badge badge-partial" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>In Review</span>
+                  </div>
+                  <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
+                    <div className="progress-bar-fill" style={{ width: `${((partialCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-partial)' }}></div>
+                  </div>
+                  <div className="kpi-subtext">Compensating controls or documentation needed</div>
+                </div>
+
+                <div className="kpi-stat-card">
+                  <div className="kpi-top-row">
+                    <span className="kpi-title">Critical & High Gaps</span>
+                    <span className="kpi-icon">🔴</span>
+                  </div>
+                  <div className="kpi-val-row">
+                    <span className="kpi-num" style={{ color: 'var(--status-non-compliant)' }}>{gapCount}</span>
+                    <span className="badge badge-non-compliant" style={{ fontSize: '0.68rem', padding: '1px 6px' }}>Action Req.</span>
+                  </div>
+                  <div className="progress-bar-container" style={{ margin: 0, height: '6px' }}>
+                    <div className="progress-bar-fill" style={{ width: `${((gapCount / (report.summary?.total_clauses_audited || 1)) * 100)}%`, background: 'var(--status-non-compliant)' }}></div>
+                  </div>
+                  <div className="kpi-subtext">Immediate remediation workflow assigned</div>
+                </div>
+              </div>
+
+              {/* 3. Balanced 2-Column Analytical Section */}
+              <div className="dashboard-split-grid">
+
+                {/* Left Column: Risk Severity Breakdown */}
+                <div className="dashboard-card">
+                  <div className="dashboard-card-header">
+                    <div className="dashboard-card-title">
+                      <span>🎯</span> Risk Severity Breakdown
+                    </div>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontWeight: 600 }}>By Impact Level</span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {[
+                      { label: 'Critical Risk Gaps', count: report.summary?.risk_breakdown?.Critical || 1, color: '#EF4444', desc: 'Direct regulatory exposure; SCIM de-provisioning, root credentials' },
+                      { label: 'High Risk Gaps', count: report.summary?.risk_breakdown?.High || 1, color: '#F59E0B', desc: 'Missing hardware MFA or network segmentation' },
+                      { label: 'Medium Risk Items', count: report.summary?.risk_breakdown?.Medium || 1, color: '#EAB308', desc: 'Tabletop breach drills, logging latency review' },
+                      { label: 'Low Risk / Compliant', count: report.summary?.risk_breakdown?.Low || 3, color: '#10B981', desc: 'Cryptographic key rotation, SIEM retention alignment' },
+                    ].map(r => (
+                      <div key={r.label} className="severity-row">
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: r.color }}></span>
+                            <span style={{ fontSize: '0.86rem', fontWeight: 600, color: 'var(--text-main)' }}>{r.label}</span>
+                          </div>
+                          <span style={{ fontSize: '0.74rem', color: 'var(--text-dim)', marginLeft: '16px' }}>{r.desc}</span>
+                        </div>
+                        <span style={{ fontSize: '1.2rem', fontWeight: 800, color: r.color, fontFamily: 'var(--font-mono)' }}>
+                          {r.count}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Right Column: Top High-Priority Audit Findings */}
+                <div className="dashboard-card">
+                  <div className="dashboard-card-header">
+                    <div className="dashboard-card-title">
+                      <span>⚠️</span> Priority Attention Findings
+                    </div>
+                    <button className="btn btn-ghost" onClick={() => setActiveTab('matrix')} style={{ fontSize: '0.78rem', padding: '4px 8px' }}>
+                      View All in Matrix →
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {(report.findings || []).slice(0, 3).map(f => {
+                      const badgeClass = f.status === 'Compliant' ? 'badge-compliant' :
+                        f.status === 'Partially Compliant' ? 'badge-partial' : 'badge-non-compliant';
+                      const riskClass = f.risk_level === 'Critical' ? 'risk-critical' :
+                        f.risk_level === 'High' ? 'risk-high' :
+                          f.risk_level === 'Medium' ? 'risk-medium' : 'risk-low';
+
+                      return (
+                        <div
+                          key={f.clause_id}
+                          className="finding-preview-item"
+                          onClick={() => {
+                            setSelectedFinding(f);
+                            setActiveTab('matrix');
+                          }}
+                          title="Click to inspect finding in Compliance Matrix"
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, paddingRight: '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className="clause-tag-pill">{f.clause_id}</span>
+                              <span className={`risk-tag ${riskClass}`}>{f.risk_level}</span>
+                              <span className={`badge ${badgeClass}`} style={{ fontSize: '0.68rem', padding: '1px 6px' }}>{f.status}</span>
+                            </div>
+                            <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {f.clause_title}
+                            </div>
+                            <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                              {f.remediation_recommendation || f.requirement_summary}
+                            </div>
+                          </div>
+                          <span style={{ fontSize: '0.85rem', color: 'var(--accent-cyan-light)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                            Inspect →
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* 4. Historical Executions Card */}
               <div className="dashboard-card">
                 <div className="dashboard-card-header">
                   <div className="dashboard-card-title">
-                    <span>⚠️</span> Priority Attention Findings
+                    <span>⏱️</span> Audit Run History & Benchmarks
                   </div>
-                  <button className="btn btn-ghost" onClick={() => setActiveTab('matrix')} style={{ fontSize: '0.78rem', padding: '4px 8px' }}>
-                    View All in Matrix →
+                  <button className="btn btn-ghost" onClick={loadAuditHistory} style={{ fontSize: '0.78rem' }}>
+                    🔄 Refresh Records
                   </button>
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {(report.findings || []).slice(0, 3).map(f => {
-                    const badgeClass = f.status === 'Compliant' ? 'badge-compliant' :
-                                       f.status === 'Partially Compliant' ? 'badge-partial' : 'badge-non-compliant';
-                    const riskClass = f.risk_level === 'Critical' ? 'risk-critical' :
-                                      f.risk_level === 'High' ? 'risk-high' :
-                                      f.risk_level === 'Medium' ? 'risk-medium' : 'risk-low';
-
-                    return (
-                      <div 
-                        key={f.clause_id} 
-                        className="finding-preview-item"
-                        onClick={() => {
-                          setSelectedFinding(f);
-                          setActiveTab('matrix');
-                        }}
-                        title="Click to inspect finding in Compliance Matrix"
-                      >
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0, paddingRight: '12px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className="clause-tag-pill">{f.clause_id}</span>
-                            <span className={`risk-tag ${riskClass}`}>{f.risk_level}</span>
-                            <span className={`badge ${badgeClass}`} style={{ fontSize: '0.68rem', padding: '1px 6px' }}>{f.status}</span>
-                          </div>
-                          <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {f.clause_title}
-                          </div>
-                          <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                            {f.remediation_recommendation || f.requirement_summary}
-                          </div>
-                        </div>
-                        <span style={{ fontSize: '0.85rem', color: 'var(--accent-cyan-light)', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                          Inspect →
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-            </div>
-
-            {/* 4. Historical Executions Card */}
-            <div className="dashboard-card">
-              <div className="dashboard-card-header">
-                <div className="dashboard-card-title">
-                  <span>⏱️</span> Audit Run History & Benchmarks
-                </div>
-                <button className="btn btn-ghost" onClick={loadAuditHistory} style={{ fontSize: '0.78rem' }}>
-                  🔄 Refresh Records
-                </button>
-              </div>
-
-              {pastAudits.length === 0 ? (
-                <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '32px 0' }}>
-                  No historical records saved yet. Launch your first audit in the Audit Studio!
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {pastAudits.slice(0, 5).map(a => (
-                    <div 
-                      key={a.audit_id} 
-                      style={{ 
-                        display: 'flex', 
-                        alignItems: 'center', 
-                        justifyContent: 'space-between',
-                        background: 'var(--bg-card)',
-                        border: '1px solid var(--border-subtle)',
-                        borderRadius: '10px',
-                        padding: '12px 18px',
-                        transition: 'all 0.2s'
-                      }}
-                    >
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: '0.85rem', color: 'var(--accent-cyan-light)' }}>
-                            {a.audit_id}
-                          </span>
-                          <span style={{ fontSize: '0.74rem', color: 'var(--text-dim)' }}>
-                            {a.timestamp}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
-                          Standard: <strong>{a.standard_name}</strong> vs Policy: <strong>{a.policy_name}</strong>
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                        <span style={{ 
-                          fontFamily: 'var(--font-mono)', 
-                          fontWeight: 800, 
-                          fontSize: '1rem',
-                          color: a.compliance_pct >= 75 ? 'var(--status-compliant)' : a.compliance_pct >= 50 ? 'var(--status-partial)' : 'var(--status-non-compliant)'
-                        }}>
-                          {a.compliance_pct}%
-                        </span>
-                        <button 
-                          className="btn btn-secondary" 
-                          style={{ padding: '5px 12px', fontSize: '0.75rem' }}
-                          onClick={() => {
-                            loadReport(a.audit_id);
-                            setActiveTab('matrix');
-                          }}
-                        >
-                          Inspect
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-          </div>
-        )}
-
-        {/* =========================================================================
-            VIEW 2: AUDIT STUDIO (LAUNCH & STREAM)
-            ========================================================================= */}
-        {activeTab === 'studio' && (
-          <div className="studio-wizard">
-            
-            <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '18px' }}>
-              <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                ⚡ Autonomous Multi-Agent Audit Studio
-              </h2>
-              <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                Configure regulatory frameworks, select policy corpora, and execute parallel LLM agent audits with real-time SSE streaming telemetry.
-              </p>
-            </div>
-
-            {/* STEP 1: SELECT REGULATORY STANDARD */}
-            <div>
-              <div className="wizard-step-header">
-                <span className="wizard-step-number">1</span>
-                <div>
-                  <div className="wizard-step-title">Select Regulatory Standard / Framework</div>
-                  <div className="wizard-step-subtitle">Choose from verified pre-seeded standards or specify a custom framework document.</div>
-                </div>
-              </div>
-
-              <div className="standards-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-                {[
-                  { key: 'iso_27001_2022', title: 'ISO/IEC 27001:2022', badge: 'ISMS Standard', clauses: 93, desc: 'International benchmark for information security controls & Annex A domains.' },
-                  { key: 'soc_2_type_2', title: 'SOC 2 Type II', badge: 'Trust Services', clauses: 64, desc: 'AICPA security, confidentiality, availability, and processing integrity criteria.' },
-                  { key: 'gdpr_art_32', title: 'GDPR Article 32', badge: 'EU Privacy', clauses: 18, desc: 'Mandatory technical and organizational measures for personal data processing.' },
-                  { key: 'nist_csf_2', title: 'NIST CSF 2.0', badge: 'Cybersecurity', clauses: 106, desc: 'Govern, Identify, Protect, Detect, Respond, and Recover core functions.' },
-                ].map(std => {
-                  const isSelected = studioStandardKey === std.key;
-                  return (
-                    <div 
-                      key={std.key} 
-                      className={`standard-card ${isSelected ? 'selected' : ''}`}
-                      onClick={() => {
-                        setStudioStandardKey(std.key);
-                        setStudioCustomStandard('');
-                      }}
-                    >
-                      <div>
-                        <div className="standard-card-header">
-                          <span className="standard-card-title">{std.title}</span>
-                          <span className="standard-badge">{std.badge}</span>
-                        </div>
-                        <div className="standard-card-desc" style={{ marginTop: '8px' }}>{std.desc}</div>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                        <span>{std.clauses} Controls Cataloged</span>
-                        {isSelected && <span style={{ color: 'var(--accent-cyan-light)', fontWeight: 700 }}>✓ Selected</span>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* STEP 2: SELECT POLICY CORPUS */}
-            <div>
-              <div className="wizard-step-header">
-                <span className="wizard-step-number">2</span>
-                <div>
-                  <div className="wizard-step-title">Select Target Company Policy Corpus</div>
-                  <div className="wizard-step-subtitle">Audit against single or multiple policy documents simultaneously.</div>
-                </div>
-              </div>
-
-              <div className="policy-selection-box">
-                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>
-                  Available Documents in Data Directory:
-                </div>
-
-                {availableDocs.map(doc => {
-                  const isChecked = selectedPolicies.includes(doc.filename);
-                  return (
-                    <div 
-                      key={doc.filename} 
-                      className={`policy-item ${isChecked ? 'checked' : ''}`}
-                      onClick={() => {
-                        if (isChecked) {
-                          setSelectedPolicies(selectedPolicies.filter(p => p !== doc.filename));
-                        } else {
-                          setSelectedPolicies([...selectedPolicies, doc.filename]);
-                        }
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <input type="checkbox" checked={isChecked} readOnly style={{ cursor: 'pointer' }} />
-                        <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>📄 {doc.filename}</span>
-                      </div>
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                        {(doc.size_bytes / 1024).toFixed(1)} KB
-                      </span>
-                    </div>
-                  );
-                })}
-
-                {/* Upload Dropzone */}
-                <label className="upload-dropzone">
-                  <input type="file" accept=".pdf,.txt,.md" onChange={handleFileUpload} style={{ display: 'none' }} />
-                  <div style={{ fontSize: '1.8rem', marginBottom: '6px' }}>📤</div>
-                  <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                    Click to Upload New Policy Document (PDF, TXT, MD)
-                  </div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
-                    Automatic semantic chunking & vector embedding will be performed.
-                  </div>
-                </label>
-              </div>
-            </div>
-
-            {/* STEP 3: PARAMETERS & EXECUTION */}
-            <div>
-              <div className="wizard-step-header">
-                <span className="wizard-step-number">3</span>
-                <div>
-                  <div className="wizard-step-title">Configure Execution Parameters</div>
-                  <div className="wizard-step-subtitle">Adjust clause extraction depth and launch autonomous multi-agent audit.</div>
-                </div>
-              </div>
-
-              <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-                <div className="form-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <label className="form-label">Clause Extraction Depth</label>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent-cyan-light)' }}>
-                      {studioMaxClauses} Clauses
-                    </span>
-                  </div>
-                  <input 
-                    type="range" 
-                    min="3" 
-                    max="25" 
-                    value={studioMaxClauses} 
-                    onChange={e => setStudioMaxClauses(parseInt(e.target.value))} 
-                    disabled={isAuditing}
-                  />
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-                    <span>Fast (3 Clauses)</span>
-                    <span>Standard (10 Clauses)</span>
-                    <span>Comprehensive (25 Clauses)</span>
-                  </div>
-                </div>
-
-                <button 
-                  className="btn btn-primary" 
-                  style={{ width: '100%', justifyContent: 'center', padding: '14px', fontSize: '1rem', fontWeight: 700 }}
-                  onClick={launchAutonomousAudit}
-                  disabled={isAuditing || user?.role === 'viewer'}
-                >
-                  {isAuditing ? '⏳ Audit Execution Active (Telemetry Streaming Below)...' : '🚀 Launch Autonomous Multi-Agent Audit'}
-                </button>
-              </div>
-            </div>
-
-            {/* REAL-TIME AGENT TELEMETRY CONSOLE */}
-            <div className="audit-telemetry-box">
-              <div className="telemetry-header">
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <span className="agent-pulse" style={{ background: isAuditing ? '#34D399' : '#64748B' }}></span>
-                  <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                    Real-Time Multi-Agent Telemetry Stream
-                  </span>
-                  <span style={{ fontSize: '0.78rem', color: 'var(--accent-cyan-light)', fontFamily: 'var(--font-mono)' }}>
-                    {isAuditing ? `[${auditProgress}% Active]` : '[Ready]'}
-                  </span>
-                </div>
-
-                {/* Agent Activity Badges */}
-                <div className="telemetry-agents-row">
-                  {[
-                    'Orchestrator',
-                    'ClauseExtractorAgent',
-                    'EvidenceHunterAgent',
-                    'ComplianceAuditorAgent',
-                    'MatrixGeneratorAgent'
-                  ].map(ag => (
-                    <span key={ag} className={`agent-chip ${activeAgent.includes(ag.substring(0, 8)) ? 'active' : ''}`}>
-                      {ag}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              {/* Progress Bar */}
-              <div className="progress-bar-container">
-                <div className="progress-bar-fill" style={{ width: `${auditProgress}%` }}></div>
-              </div>
-
-              {/* Streaming Log Output */}
-              <div className="agent-log-window">
-                {agentLogs.length === 0 ? (
-                  <div style={{ color: 'var(--text-dim)', textAlign: 'center', margin: 'auto' }}>
-                    Agent telemetry is idle. Launch an audit above to view live thought processes and semantic matches.
+                {pastAudits.length === 0 ? (
+                  <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '32px 0' }}>
+                    No historical records saved yet. Launch your first audit in the Audit Studio!
                   </div>
                 ) : (
-                  agentLogs.map((log, i) => (
-                    <div key={i} className="log-entry">
-                      <span className="log-time">[{log.timestamp}]</span>
-                      <span className="log-agent">{log.agent_name}:</span>
-                      <span className="log-msg">{log.message}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {/* =========================================================================
-            VIEW 3: COMPLIANCE MATRIX & TWO-PANE EVIDENCE INSPECTOR
-            ========================================================================= */}
-        {activeTab === 'matrix' && (
-          <div className="workspace">
-            
-            {/* LEFT PANE: FINDINGS MATRIX LIST */}
-            <div className="matrix-panel">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <span>📋</span> Compliance Matrix ({filteredFindings.length})
-                </div>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                  {report?.audit_id}
-                </span>
-              </div>
-
-              {/* Filter & Search Bar */}
-              <div className="filter-bar">
-                <input 
-                  type="text" 
-                  className="search-input" 
-                  placeholder="Search clause ID, title, or requirement..."
-                  value={matrixSearch}
-                  onChange={e => setMatrixSearch(e.target.value)}
-                />
-                <div className="filter-btn-group">
-                  <button className={`filter-btn ${matrixFilter === 'ALL' ? 'active' : ''}`} onClick={() => setMatrixFilter('ALL')}>All</button>
-                  <button className={`filter-btn ${matrixFilter === 'GAP' ? 'active' : ''}`} onClick={() => setMatrixFilter('GAP')}>🔴 Gaps</button>
-                  <button className={`filter-btn ${matrixFilter === 'PARTIAL' ? 'active' : ''}`} onClick={() => setMatrixFilter('PARTIAL')}>🟡 Partial</button>
-                  <button className={`filter-btn ${matrixFilter === 'COMPLIANT' ? 'active' : ''}`} onClick={() => setMatrixFilter('COMPLIANT')}>🟢 Compliant</button>
-                  <button className={`filter-btn ${matrixFilter === 'VERIFIED' ? 'active' : ''}`} onClick={() => setMatrixFilter('VERIFIED')}>✓ Verified</button>
-                </div>
-              </div>
-
-              {/* Findings List */}
-              <div className="findings-list">
-                {filteredFindings.map(f => {
-                  const isSelected = selectedFinding?.clause_id === f.clause_id;
-                  const badgeClass = f.status === 'Compliant' ? 'badge-compliant' :
-                                     f.status === 'Partially Compliant' ? 'badge-partial' : 'badge-non-compliant';
-                  const riskClass = f.risk_level === 'Critical' ? 'risk-critical' :
-                                    f.risk_level === 'High' ? 'risk-high' :
-                                    f.risk_level === 'Medium' ? 'risk-medium' : 'risk-low';
-
-                  return (
-                    <div 
-                      key={f.clause_id} 
-                      className={`finding-row ${isSelected ? 'selected' : ''}`}
-                      onClick={() => setSelectedFinding(f)}
-                    >
-                      <div className="finding-header-row">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span className="clause-tag-pill">{f.clause_id}</span>
-                          <span className={`risk-tag ${riskClass}`}>{f.risk_level}</span>
-                          {f.is_verified && (
-                            <span style={{ fontSize: '0.72rem', color: '#10B981', fontWeight: 700 }} title="Verified by Lead Auditor">
-                              ✓ Verified
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {pastAudits.slice(0, 5).map(a => (
+                      <div
+                        key={a.audit_id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          background: 'var(--bg-card)',
+                          border: '1px solid var(--border-subtle)',
+                          borderRadius: '10px',
+                          padding: '12px 18px',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: '0.85rem', color: 'var(--accent-cyan-light)' }}>
+                              {a.audit_id}
                             </span>
-                          )}
-                        </div>
-                        <span className={`badge ${badgeClass}`}>{f.status}</span>
-                      </div>
-
-                      <div className="finding-title">{f.clause_title}</div>
-                      <div className="finding-req">{f.requirement_summary}</div>
-
-                      <div className="finding-footer-row">
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          {(f.citations || []).map((c, i) => (
-                            <span key={i} className="citation-chip">
-                              📄 {c.document_name ? c.document_name.substring(0, 15) : 'Doc'} : P.{c.page_number}
+                            <span style={{ fontSize: '0.74rem', color: 'var(--text-dim)' }}>
+                              {a.timestamp}
                             </span>
-                          ))}
+                          </div>
+                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                            Standard: <strong>{a.standard_name}</strong> vs Policy: <strong>{a.policy_name}</strong>
+                          </div>
                         </div>
-                        <span className="inspect-chevron">Inspect Evidence →</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
 
-            {/* RIGHT PANE: DEEP EVIDENCE & AUDITOR GOVERNANCE INSPECTOR */}
-            <div className="evidence-panel">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <span>🔍</span> Deep Evidence & Governance Inspector
-                </div>
-                {selectedFinding && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', border: '1px solid var(--border-subtle)' }}>
-                      Risk: {selectedFinding.risk_level}
-                    </span>
-                    {selectedFinding.is_verified && (
-                      <span className="badge badge-compliant">Auditor Verified</span>
-                    )}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                          <span style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontWeight: 800,
+                            fontSize: '1rem',
+                            color: a.compliance_pct >= 75 ? 'var(--status-compliant)' : a.compliance_pct >= 50 ? 'var(--status-partial)' : 'var(--status-non-compliant)'
+                          }}>
+                            {a.compliance_pct}%
+                          </span>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '5px 12px', fontSize: '0.75rem' }}
+                            onClick={() => {
+                              loadReport(a.audit_id);
+                              setActiveTab('matrix');
+                            }}
+                          >
+                            Inspect
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
 
-              <div className="evidence-content">
-                {selectedFinding ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    
-                    {/* Clause Mandate Header */}
-                    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '18px 22px' }}>
-                      <div style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--accent-cyan-light)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                        Regulatory Clause Requirement • {selectedFinding.clause_id}
-                      </div>
-                      <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px' }}>
-                        {selectedFinding.clause_title}
-                      </h3>
-                      <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: '1.6', marginTop: '8px' }}>
-                        {selectedFinding.requirement_summary}
-                      </p>
+            </div>
+          )}
+
+          {/* =========================================================================
+            VIEW 2: AUDIT STUDIO (LAUNCH & STREAM)
+            ========================================================================= */}
+          {activeTab === 'studio' && (
+            <div className="view-container">
+              <div className="studio-wizard" style={{ width: '100%', maxWidth: '1080px', margin: '0 auto' }}>
+
+                <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '18px' }}>
+                  <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                    ⚡ Autonomous Multi-Agent Audit Studio
+                  </h2>
+                  <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    Configure regulatory frameworks, select policy corpora, and execute parallel LLM agent audits with real-time SSE streaming telemetry.
+                  </p>
+                </div>
+
+                {/* STEP 1: SELECT REGULATORY STANDARD */}
+                <div>
+                  <div className="wizard-step-header">
+                    <span className="wizard-step-number">1</span>
+                    <div>
+                      <div className="wizard-step-title">Select Regulatory Standard / Framework</div>
+                      <div className="wizard-step-subtitle">Choose from verified pre-seeded standards or specify a custom framework document.</div>
+                    </div>
+                  </div>
+
+                  <div className="standards-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+                    {[
+                      { key: 'iso_27001_2022', title: 'ISO/IEC 27001:2022', badge: 'ISMS Standard', clauses: 93, desc: 'International benchmark for information security controls & Annex A domains.' },
+                      { key: 'soc_2_type_ii', title: 'SOC 2 Type II', badge: 'Trust Services', clauses: 64, desc: 'AICPA security, confidentiality, availability, and processing integrity criteria.' },
+                      { key: 'gdpr_compliance', title: 'GDPR Article 32', badge: 'EU Privacy', clauses: 18, desc: 'Mandatory technical and organizational measures for personal data processing.' },
+                      { key: 'nist_csf_2_0', title: 'NIST CSF 2.0', badge: 'Cybersecurity', clauses: 106, desc: 'Govern, Identify, Protect, Detect, Respond, and Recover core functions.' },
+                    ].map(std => {
+                      const isSelected = studioStandardKey === std.key;
+                      return (
+                        <div
+                          key={std.key}
+                          className={`standard-card ${isSelected ? 'selected' : ''}`}
+                          onClick={() => {
+                            setStudioStandardKey(std.key);
+                            setStudioCustomStandard('');
+                          }}
+                        >
+                          <div>
+                            <div className="standard-card-header">
+                              <span className="standard-card-title">{std.title}</span>
+                              <span className="standard-badge">{std.badge}</span>
+                            </div>
+                            <div className="standard-card-desc" style={{ marginTop: '8px' }}>{std.desc}</div>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                            <span>{std.clauses} Controls Cataloged</span>
+                            {isSelected && <span style={{ color: 'var(--accent-cyan-light)', fontWeight: 700 }}>✓ Selected</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* STEP 2: SELECT POLICY CORPUS */}
+                <div>
+                  <div className="wizard-step-header">
+                    <span className="wizard-step-number">2</span>
+                    <div>
+                      <div className="wizard-step-title">Select Target Company Policy Corpus</div>
+                      <div className="wizard-step-subtitle">Audit against single or multiple policy documents simultaneously.</div>
+                    </div>
+                  </div>
+
+                  <div className="policy-selection-box">
+                    <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Available Documents in Data Directory:
                     </div>
 
-                    {/* Policy Evidence Card */}
-                    <div className="doc-quote-card">
-                      <div className="doc-quote-meta">
-                        FOUND POLICY EVIDENCE | SOURCE: {selectedFinding.citations?.[0]?.document_name || 'Enterprise Policy'} (Page {selectedFinding.citations?.[0]?.page_number || 'N/A'})
+                    {availableDocs.map(doc => {
+                      const isChecked = selectedPolicies.includes(doc.filename);
+                      return (
+                        <div
+                          key={doc.filename}
+                          className={`policy-item ${isChecked ? 'checked' : ''}`}
+                          onClick={() => {
+                            if (isChecked) {
+                              setSelectedPolicies(selectedPolicies.filter(p => p !== doc.filename));
+                            } else {
+                              setSelectedPolicies([...selectedPolicies, doc.filename]);
+                            }
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <input type="checkbox" checked={isChecked} readOnly style={{ cursor: 'pointer' }} />
+                            <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>📄 {doc.filename}</span>
+                          </div>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                            {(doc.size_bytes / 1024).toFixed(1)} KB
+                          </span>
+                        </div>
+                      );
+                    })}
+
+                    {/* Upload Dropzone */}
+                    <label className="upload-dropzone">
+                      <input type="file" accept=".pdf,.txt,.md" onChange={handleFileUpload} style={{ display: 'none' }} />
+                      <div style={{ fontSize: '1.8rem', marginBottom: '6px' }}>📤</div>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                        Click to Upload New Policy Document (PDF, TXT, MD)
                       </div>
-                      <div className="doc-quote-text">
-                        "{selectedFinding.evidence_found || 'No formal policy statements detected in document.'}"
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+                        Automatic semantic chunking & vector embedding will be performed.
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* STEP 3: PARAMETERS & EXECUTION */}
+                <div>
+                  <div className="wizard-step-header">
+                    <span className="wizard-step-number">3</span>
+                    <div>
+                      <div className="wizard-step-title">Configure Execution Parameters</div>
+                      <div className="wizard-step-subtitle">Adjust clause extraction depth and launch autonomous multi-agent audit.</div>
+                    </div>
+                  </div>
+
+                  <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                    <div className="form-group">
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <label className="form-label">Clause Extraction Depth</label>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent-cyan-light)' }}>
+                          {studioMaxClauses} Clauses
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="3"
+                        max="25"
+                        value={studioMaxClauses}
+                        onChange={e => setStudioMaxClauses(parseInt(e.target.value))}
+                        disabled={isAuditing}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                        <span>Fast (3 Clauses)</span>
+                        <span>Standard (10 Clauses)</span>
+                        <span>Comprehensive (25 Clauses)</span>
                       </div>
                     </div>
 
-                    {/* Gap Analysis Box */}
-                    <div className="gap-box">
-                      <div className="gap-title">⚠️ Identified Compliance Gap / Ambiguity</div>
-                      <div style={{ fontSize: '0.88rem', color: '#FECACA', lineHeight: '1.5' }}>
-                        {selectedFinding.gap_analysis || 'No compliance gap identified.'}
-                      </div>
+                    <button
+                      className="btn btn-primary"
+                      style={{ width: '100%', justifyContent: 'center', padding: '14px', fontSize: '1rem', fontWeight: 700 }}
+                      onClick={launchAutonomousAudit}
+                      disabled={isAuditing || user?.role === 'viewer'}
+                    >
+                      {isAuditing ? '⏳ Audit Execution Active (Telemetry Streaming Below)...' : '🚀 Launch Autonomous Multi-Agent Audit'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* REAL-TIME AGENT TELEMETRY CONSOLE */}
+                <div className="audit-telemetry-box">
+                  <div className="telemetry-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span className="agent-pulse" style={{ background: isAuditing ? '#34D399' : '#64748B' }}></span>
+                      <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                        Real-Time Multi-Agent Telemetry Stream
+                      </span>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--accent-cyan-light)', fontFamily: 'var(--font-mono)' }}>
+                        {isAuditing ? `[${auditProgress}% Active]` : '[Ready]'}
+                      </span>
                     </div>
 
-                    {/* Prescriptive Remediation Box */}
-                    <div className="fix-box">
-                      <div className="fix-title">💡 Prescribed Engineering Remediation</div>
-                      <div style={{ fontSize: '0.88rem', color: '#D1FAE5', lineHeight: '1.5' }}>
-                        {selectedFinding.remediation_recommendation || 'Maintain current policy enforcement.'}
-                      </div>
+                    {/* Agent Activity Badges */}
+                    <div className="telemetry-agents-row">
+                      {[
+                        'Orchestrator',
+                        'ClauseExtractorAgent',
+                        'EvidenceHunterAgent',
+                        'ComplianceAuditorAgent',
+                        'MatrixGeneratorAgent'
+                      ].map(ag => (
+                        <span key={ag} className={`agent-chip ${activeAgent.includes(ag.substring(0, 8)) ? 'active' : ''}`}>
+                          {ag}
+                        </span>
+                      ))}
                     </div>
+                  </div>
 
-                    {/* Auditor Governance & Override Review Card */}
-                    <div className="auditor-review-card">
-                      <div className="auditor-review-title">
-                        <span>🛡️</span> Auditor Review & Governance Override
+                  {/* Progress Bar */}
+                  <div className="progress-bar-container">
+                    <div className="progress-bar-fill" style={{ width: `${auditProgress}%` }}></div>
+                  </div>
+
+                  {/* Streaming Log Output */}
+                  <div className="agent-log-window">
+                    {agentLogs.length === 0 ? (
+                      <div style={{ color: 'var(--text-dim)', textAlign: 'center', margin: 'auto' }}>
+                        Agent telemetry is idle. Launch an audit above to view live thought processes and semantic matches.
+                      </div>
+                    ) : (
+                      agentLogs.map((log, i) => (
+                        <div key={i} className="log-entry">
+                          <span className="log-time">[{log.timestamp}]</span>
+                          <span className="log-agent">{log.agent_name}:</span>
+                          <span className="log-msg">{log.message}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          )}
+
+          {/* =========================================================================
+            VIEW 3: COMPLIANCE MATRIX & TWO-PANE EVIDENCE INSPECTOR
+            ========================================================================= */}
+          {activeTab === 'matrix' && (
+            <div className="workspace">
+
+              {/* LEFT PANE: FINDINGS MATRIX LIST */}
+              <div className="matrix-panel">
+                <div className="panel-header">
+                  <div className="panel-title">
+                    <span>📋</span> Compliance Matrix ({filteredFindings.length})
+                  </div>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                    {report?.audit_id}
+                  </span>
+                </div>
+
+                {/* Filter & Search Bar */}
+                <div className="filter-bar">
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="Search clause ID, title, or requirement..."
+                    value={matrixSearch}
+                    onChange={e => setMatrixSearch(e.target.value)}
+                  />
+                  <div className="filter-btn-group">
+                    <button className={`filter-btn ${matrixFilter === 'ALL' ? 'active' : ''}`} onClick={() => setMatrixFilter('ALL')}>All</button>
+                    <button className={`filter-btn ${matrixFilter === 'GAP' ? 'active' : ''}`} onClick={() => setMatrixFilter('GAP')}>🔴 Gaps</button>
+                    <button className={`filter-btn ${matrixFilter === 'PARTIAL' ? 'active' : ''}`} onClick={() => setMatrixFilter('PARTIAL')}>🟡 Partial</button>
+                    <button className={`filter-btn ${matrixFilter === 'COMPLIANT' ? 'active' : ''}`} onClick={() => setMatrixFilter('COMPLIANT')}>🟢 Compliant</button>
+                    <button className={`filter-btn ${matrixFilter === 'VERIFIED' ? 'active' : ''}`} onClick={() => setMatrixFilter('VERIFIED')}>✓ Verified</button>
+                  </div>
+                </div>
+
+                {/* Findings List */}
+                <div className="findings-list">
+                  {filteredFindings.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '48px 20px', color: 'var(--text-dim)' }}>
+                      <div style={{ fontSize: '2rem', marginBottom: '8px' }}>🔍</div>
+                      <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-main)' }}>No Matching Findings</div>
+                      <div style={{ fontSize: '0.80rem', margin: '6px auto 14px', maxWidth: '280px', lineHeight: '1.4' }}>
+                        {matrixSearch ? `No controls matched "${matrixSearch}".` : `No controls under filter "${matrixFilter}".`}
+                      </div>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ fontSize: '0.78rem', padding: '6px 14px', margin: '0 auto' }}
+                        onClick={() => { setMatrixSearch(''); setMatrixFilter('ALL'); }}
+                      >
+                        Reset Filter
+                      </button>
+                    </div>
+                  ) : (
+                    filteredFindings.map(f => {
+                      const isSelected = selectedFinding?.clause_id === f.clause_id;
+                      const badgeClass = f.status === 'Compliant' ? 'badge-compliant' :
+                        f.status === 'Partially Compliant' ? 'badge-partial' : 'badge-non-compliant';
+                      const riskClass = f.risk_level === 'Critical' ? 'risk-critical' :
+                        f.risk_level === 'High' ? 'risk-high' :
+                          f.risk_level === 'Medium' ? 'risk-medium' : 'risk-low';
+
+                      return (
+                        <div
+                          key={f.clause_id}
+                          className={`finding-row ${isSelected ? 'selected' : ''}`}
+                          onClick={() => setSelectedFinding(f)}
+                        >
+                          <div className="finding-header-row">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span className="clause-tag-pill">{f.clause_id}</span>
+                              <span className={`risk-tag ${riskClass}`}>{f.risk_level}</span>
+                              {f.is_verified && (
+                                <span style={{ fontSize: '0.72rem', color: '#10B981', fontWeight: 700 }} title="Verified by Lead Auditor">
+                                  ✓ Verified
+                                </span>
+                              )}
+                            </div>
+                            <span className={`badge ${badgeClass}`}>{f.status}</span>
+                          </div>
+
+                          <div className="finding-title">{f.clause_title}</div>
+                          <div className="finding-req">{f.requirement_summary}</div>
+
+                          <div className="finding-footer-row">
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              {(f.citations || []).map((c, i) => (
+                                <span key={i} className="citation-chip">
+                                  📄 {c.document_name ? c.document_name.substring(0, 15) : 'Doc'} : P.{c.page_number}
+                                </span>
+                              ))}
+                            </div>
+                            <span className="inspect-chevron">Inspect Evidence →</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              {/* RIGHT PANE: DEEP EVIDENCE & AUDITOR GOVERNANCE INSPECTOR */}
+              <div className="evidence-panel">
+                <div className="panel-header">
+                  <div className="panel-title">
+                    <span>🔍</span> Deep Evidence & Governance Inspector
+                  </div>
+                  {selectedFinding && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', border: '1px solid var(--border-subtle)' }}>
+                        Risk: {selectedFinding.risk_level}
+                      </span>
+                      {selectedFinding.is_verified && (
+                        <span className="badge badge-compliant">Auditor Verified</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="evidence-content">
+                  {selectedFinding ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+                      {/* Clause Mandate Header */}
+                      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '12px', padding: '18px 22px' }}>
+                        <div style={{ fontSize: '0.76rem', fontWeight: 700, color: 'var(--accent-cyan-light)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                          Regulatory Clause Requirement • {selectedFinding.clause_id}
+                        </div>
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px' }}>
+                          {selectedFinding.clause_title}
+                        </h3>
+                        <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: '1.6', marginTop: '8px' }}>
+                          {selectedFinding.requirement_summary}
+                        </p>
                       </div>
 
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-                        <div className="form-group">
-                          <label className="form-label">Compliance Status Override</label>
-                          <select 
-                            className="form-input" 
-                            value={editStatus} 
-                            onChange={e => setEditStatus(e.target.value)}
-                            disabled={user?.role === 'viewer'}
-                          >
-                            <option value="Compliant">Compliant</option>
-                            <option value="Partially Compliant">Partially Compliant</option>
-                            <option value="Non-Compliant">Non-Compliant</option>
-                          </select>
+                      {/* Policy Evidence Card */}
+                      <div className="doc-quote-card">
+                        <div className="doc-quote-meta">
+                          FOUND POLICY EVIDENCE | SOURCE: {selectedFinding.citations?.[0]?.document_name || 'Enterprise Policy'} (Page {selectedFinding.citations?.[0]?.page_number || 'N/A'})
+                        </div>
+                        <div className="doc-quote-text">
+                          "{selectedFinding.evidence_found || 'No formal policy statements detected in document.'}"
+                        </div>
+                      </div>
+
+                      {/* Gap Analysis Box */}
+                      <div className="gap-box">
+                        <div className="gap-title">⚠️ Identified Compliance Gap / Ambiguity</div>
+                        <div style={{ fontSize: '0.88rem', color: '#FECACA', lineHeight: '1.5' }}>
+                          {selectedFinding.gap_analysis || 'No compliance gap identified.'}
+                        </div>
+                      </div>
+
+                      {/* Prescriptive Remediation Box */}
+                      <div className="fix-box">
+                        <div className="fix-title">💡 Prescribed Engineering Remediation</div>
+                        <div style={{ fontSize: '0.88rem', color: '#D1FAE5', lineHeight: '1.5' }}>
+                          {selectedFinding.remediation_recommendation || 'Maintain current policy enforcement.'}
+                        </div>
+                      </div>
+
+                      {/* Auditor Governance & Override Review Card */}
+                      <div className="auditor-review-card">
+                        <div className="auditor-review-title">
+                          <span>🛡️</span> Auditor Review & Governance Override
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                          <div className="form-group">
+                            <label className="form-label">Compliance Status Override</label>
+                            <select
+                              className="form-input"
+                              value={editStatus}
+                              onChange={e => setEditStatus(e.target.value)}
+                              disabled={user?.role === 'viewer'}
+                            >
+                              <option value="Compliant">Compliant</option>
+                              <option value="Partially Compliant">Partially Compliant</option>
+                              <option value="Non-Compliant">Non-Compliant</option>
+                            </select>
+                          </div>
+
+                          <div className="form-group">
+                            <label className="form-label">Remediation Status</label>
+                            <select
+                              className="form-input"
+                              value={editRemediationStatus}
+                              onChange={e => setEditRemediationStatus(e.target.value)}
+                              disabled={user?.role === 'viewer'}
+                            >
+                              <option value="Open">Open</option>
+                              <option value="In Progress">In Progress</option>
+                              <option value="Under Review">Under Review</option>
+                              <option value="Resolved">Resolved</option>
+                            </select>
+                          </div>
                         </div>
 
                         <div className="form-group">
-                          <label className="form-label">Remediation Status</label>
-                          <select 
-                            className="form-input" 
-                            value={editRemediationStatus} 
-                            onChange={e => setEditRemediationStatus(e.target.value)}
-                            disabled={user?.role === 'viewer'}
-                          >
-                            <option value="Open">Open</option>
-                            <option value="In Progress">In Progress</option>
-                            <option value="Under Review">Under Review</option>
-                            <option value="Resolved">Resolved</option>
-                          </select>
-                        </div>
-                      </div>
-
-                      <div className="form-group">
-                        <label className="form-label">Assigned Remediation Owner</label>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          value={editOwner} 
-                          onChange={e => setEditOwner(e.target.value)}
-                          placeholder="e.g. SecOps Lead / Jane Doe"
-                          disabled={user?.role === 'viewer'}
-                        />
-                      </div>
-
-                      <div className="form-group">
-                        <label className="form-label">Auditor Governance Notes</label>
-                        <textarea 
-                          className="form-input" 
-                          rows="3" 
-                          value={editNotes} 
-                          onChange={e => setEditNotes(e.target.value)}
-                          placeholder="Add auditor observations, verified compensating controls, or follow-up milestones..."
-                          disabled={user?.role === 'viewer'}
-                          style={{ resize: 'vertical' }}
-                        />
-                      </div>
-
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.86rem', color: 'var(--text-main)', fontWeight: 600 }}>
-                          <input 
-                            type="checkbox" 
-                            checked={editVerified} 
-                            onChange={e => setEditVerified(e.target.checked)}
+                          <label className="form-label">Assigned Remediation Owner</label>
+                          <input
+                            type="text"
+                            className="form-input"
+                            value={editOwner}
+                            onChange={e => setEditOwner(e.target.value)}
+                            placeholder="e.g. SecOps Lead / Jane Doe"
                             disabled={user?.role === 'viewer'}
                           />
-                          Mark Finding as Verified by Auditor
-                        </label>
+                        </div>
 
-                        <button 
-                          className="btn btn-primary" 
-                          onClick={saveAuditorReview}
-                          disabled={isSavingReview || user?.role === 'viewer'}
-                          style={{ padding: '8px 18px', fontSize: '0.84rem' }}
-                        >
-                          {isSavingReview ? 'Saving...' : '💾 Save Review'}
-                        </button>
+                        <div className="form-group">
+                          <label className="form-label">Auditor Governance Notes</label>
+                          <textarea
+                            className="form-input"
+                            rows="3"
+                            value={editNotes}
+                            onChange={e => setEditNotes(e.target.value)}
+                            placeholder="Add auditor observations, verified compensating controls, or follow-up milestones..."
+                            disabled={user?.role === 'viewer'}
+                            style={{ resize: 'vertical' }}
+                          />
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.86rem', color: 'var(--text-main)', fontWeight: 600 }}>
+                            <input
+                              type="checkbox"
+                              checked={editVerified}
+                              onChange={e => setEditVerified(e.target.checked)}
+                              disabled={user?.role === 'viewer'}
+                            />
+                            Mark Finding as Verified by Auditor
+                          </label>
+
+                          <button
+                            className="btn btn-primary"
+                            onClick={saveAuditorReview}
+                            disabled={isSavingReview || user?.role === 'viewer'}
+                            style={{ padding: '8px 18px', fontSize: '0.84rem' }}
+                          >
+                            {isSavingReview ? 'Saving...' : '💾 Save Review'}
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  ) : (
+                    <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '60px 0' }}>
+                      Select a regulatory clause on the left to inspect evidence, gap analysis, and auditor actions.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* =========================================================================
+            VIEW 4: STANDARDS CATALOG
+            ========================================================================= */}
+          {activeTab === 'standards' && (
+            <div className="view-container">
+
+              <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
+                <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                  📚 Pre-Seeded Regulatory Standards & Frameworks
+                </h2>
+                <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  AegisAudit AI includes curated, pre-seeded compliance frameworks ready for instant zero-setup evaluation.
+                </p>
+              </div>
+
+              <div className="standards-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
+                {(standardsCatalog.length > 0 ? standardsCatalog : [
+                  {
+                    key: 'iso_27001_2022',
+                    title: 'ISO/IEC 27001:2022',
+                    full_name: 'Information Security Management System (ISMS)',
+                    badge: 'International Standard',
+                    clause_count: 93,
+                    description: 'Global benchmark for establishing, implementing, maintaining and continually improving an information security management system.',
+                    key_controls: ['A.5.15 Access Control', 'A.8.5 Secure Authentication & MFA', 'A.8.8 Vulnerability Management', 'A.8.20 Network Security']
+                  },
+                  {
+                    key: 'soc_2_type_ii',
+                    title: 'SOC 2 Type II',
+                    full_name: 'Trust Services Criteria for Security & Confidentiality',
+                    badge: 'AICPA Standard',
+                    clause_count: 64,
+                    description: 'Rigorous audit standard evaluating controls relevant to security, availability, processing integrity, confidentiality, and privacy.',
+                    key_controls: ['CC6.1 Logical Access Controls', 'CC6.6 Network Boundary Protections', 'CC7.1 Vulnerability Detection', 'CC8.1 Change Management']
+                  },
+                  {
+                    key: 'gdpr_compliance',
+                    title: 'GDPR Article 32',
+                    full_name: 'Security of Processing Personal Data',
+                    badge: 'EU Regulation',
+                    clause_count: 18,
+                    description: 'Mandates technical and organizational measures to ensure data protection, pseudonymization, encryption, and regular security testing.',
+                    key_controls: ['Art. 32(1)(a) Encryption & Pseudonymisation', 'Art. 32(1)(b) Confidentiality & Integrity', 'Art. 32(1)(d) Regular Security Testing']
+                  },
+                  {
+                    key: 'nist_csf_2_0',
+                    title: 'NIST CSF 2.0',
+                    full_name: 'NIST Cybersecurity Framework 2.0',
+                    badge: 'Federal Framework',
+                    clause_count: 106,
+                    description: 'Comprehensive guidelines across Govern, Identify, Protect, Detect, Respond, and Recover to manage cybersecurity risks.',
+                    key_controls: ['GV.OC-01 Organizational Context', 'PR.AA-01 Identity & Access', 'DE.CM-01 Continuous Monitoring', 'RS.MA-01 Incident Execution']
+                  }
+                ]).map(std => (
+                  <div key={std.key} className="standard-card">
+                    <div>
+                      <div className="standard-card-header">
+                        <div>
+                          <div className="standard-card-title">{std.title}</div>
+                          <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: '2px' }}>{std.full_name}</div>
+                        </div>
+                        <span className="standard-badge">{std.badge || 'Standard'}</span>
+                      </div>
+
+                      <p className="standard-card-desc" style={{ marginTop: '12px' }}>
+                        {std.description}
+                      </p>
+
+                      <div style={{ marginTop: '14px' }}>
+                        <div style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                          Key Controls Included:
+                        </div>
+                        <div className="standard-controls-list">
+                          {(std.key_controls || []).map((ctrl, i) => (
+                            <span key={i} className="standard-control-pill">{ctrl}</span>
+                          ))}
+                        </div>
                       </div>
                     </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                        {std.clause_count || 50}+ Regulatory Controls
+                      </span>
+                      <button
+                        className="btn btn-primary"
+                        style={{ padding: '6px 14px', fontSize: '0.78rem' }}
+                        onClick={() => {
+                          setStudioStandardKey(std.key);
+                          setActiveTab('studio');
+                        }}
+                      >
+                        Audit With This Standard →
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+            </div>
+          )}
+
+          {/* =========================================================================
+            VIEW 5: COMPLIANCE DIFF & BENCHMARKING
+            ========================================================================= */}
+          {activeTab === 'diff' && (
+            <div className="view-container">
+              <div className="diff-container" style={{ width: '100%', margin: '0 auto' }}>
+
+                <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
+                  <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                    🔀 Compliance Diff & Historical Benchmarking
+                  </h2>
+                  <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    Compare two audit runs to evaluate remediation progress, track resolved compliance gaps, and catch regressions.
+                  </p>
+                </div>
+
+                {/* Audit Selection Row */}
+                <div className="diff-selectors-row">
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label">Baseline Audit (Before)</label>
+                    <select
+                      className="form-input"
+                      value={diffBaselineId}
+                      onChange={e => setDiffBaselineId(e.target.value)}
+                    >
+                      <option value="">Select Baseline Run...</option>
+                      {pastAudits.map(a => (
+                        <option key={a.audit_id} value={a.audit_id}>
+                          {a.audit_id} - {a.standard_name} ({a.compliance_pct}%) [{a.timestamp}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ fontSize: '1.5rem', color: 'var(--accent-cyan-light)', marginTop: '20px' }}>
+                    ➔
+                  </div>
+
+                  <div className="form-group" style={{ flex: 1 }}>
+                    <label className="form-label">Target Audit (After)</label>
+                    <select
+                      className="form-input"
+                      value={diffTargetId}
+                      onChange={e => setDiffTargetId(e.target.value)}
+                    >
+                      <option value="">Select Target Run...</option>
+                      {pastAudits.map(a => (
+                        <option key={a.audit_id} value={a.audit_id}>
+                          {a.audit_id} - {a.standard_name} ({a.compliance_pct}%) [{a.timestamp}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    className="btn btn-primary"
+                    style={{ height: '42px', marginTop: '24px', padding: '0 20px' }}
+                    onClick={runDiffComparison}
+                    disabled={isDiffLoading}
+                  >
+                    {isDiffLoading ? 'Comparing...' : 'Run Diff Analysis'}
+                  </button>
+                </div>
+
+                {/* Diff Results Display */}
+                {diffResult ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+                    {/* Metric Delta Cards */}
+                    <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                      <div className="diff-stat-card">
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Posture Delta</div>
+                        <div className="diff-stat-val" style={{ color: diffResult.score_delta >= 0 ? 'var(--status-compliant)' : 'var(--status-non-compliant)' }}>
+                          {diffResult.score_delta >= 0 ? `+${diffResult.score_delta}%` : `${diffResult.score_delta}%`}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                          {diffResult.baseline_score}% ➔ {diffResult.target_score}%
+                        </div>
+                      </div>
+
+                      <div className="diff-stat-card">
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Resolved Gaps</div>
+                        <div className="diff-stat-val" style={{ color: 'var(--status-compliant)' }}>
+                          {diffResult.resolved_gaps_count}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Successfully Remediated</div>
+                      </div>
+
+                      <div className="diff-stat-card">
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>New Gaps</div>
+                        <div className="diff-stat-val" style={{ color: 'var(--status-non-compliant)' }}>
+                          {diffResult.new_gaps_count}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Requires Attention</div>
+                      </div>
+
+                      <div className="diff-stat-card">
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Unchanged Controls</div>
+                        <div className="diff-stat-val" style={{ color: 'var(--accent-cyan-light)' }}>
+                          {diffResult.unchanged_count}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Stable Alignment</div>
+                      </div>
+                    </div>
+
+                    {/* Resolved Gaps List */}
+                    {diffResult.resolved_gaps?.length > 0 && (
+                      <div style={{ background: 'var(--bg-card)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '12px', padding: '20px' }}>
+                        <h4 style={{ color: 'var(--status-compliant)', fontSize: '0.95rem', fontWeight: 700, marginBottom: '10px' }}>
+                          🎉 Resolved Gaps ({diffResult.resolved_gaps.length})
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {diffResult.resolved_gaps.map((item, i) => (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.84rem' }}>
+                              <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{item.clause_id}: {item.title}</span>
+                              <span className="badge badge-compliant">Improved: {item.old_status} ➔ {item.new_status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* New Regressions List */}
+                    {diffResult.new_gaps?.length > 0 && (
+                      <div style={{ background: 'var(--bg-card)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '12px', padding: '20px' }}>
+                        <h4 style={{ color: 'var(--status-non-compliant)', fontSize: '0.95rem', fontWeight: 700, marginBottom: '10px' }}>
+                          ⚠️ Newly Introduced Gaps ({diffResult.new_gaps.length})
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {diffResult.new_gaps.map((item, i) => (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.84rem' }}>
+                              <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{item.clause_id}: {item.title}</span>
+                              <span className="badge badge-non-compliant">Regressed: {item.new_status}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                   </div>
                 ) : (
                   <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '60px 0' }}>
-                    Select a regulatory clause on the left to inspect evidence, gap analysis, and auditor actions.
-                  </div>
-                )}
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {/* =========================================================================
-            VIEW 4: STANDARDS CATALOG
-            ========================================================================= */}
-        {activeTab === 'standards' && (
-          <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-            
-            <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
-              <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                📚 Pre-Seeded Regulatory Standards & Frameworks
-              </h2>
-              <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                AegisAudit AI includes curated, pre-seeded compliance frameworks ready for instant zero-setup evaluation.
-              </p>
-            </div>
-
-            <div className="standards-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))' }}>
-              {(standardsCatalog.length > 0 ? standardsCatalog : [
-                {
-                  key: 'iso_27001_2022',
-                  title: 'ISO/IEC 27001:2022',
-                  full_name: 'Information Security Management System (ISMS)',
-                  badge: 'International Standard',
-                  clause_count: 93,
-                  description: 'Global benchmark for establishing, implementing, maintaining and continually improving an information security management system.',
-                  key_controls: ['A.5.15 Access Control', 'A.8.5 Secure Authentication & MFA', 'A.8.8 Vulnerability Management', 'A.8.20 Network Security']
-                },
-                {
-                  key: 'soc_2_type_2',
-                  title: 'SOC 2 Type II',
-                  full_name: 'Trust Services Criteria for Security & Confidentiality',
-                  badge: 'AICPA Standard',
-                  clause_count: 64,
-                  description: 'Rigorous audit standard evaluating controls relevant to security, availability, processing integrity, confidentiality, and privacy.',
-                  key_controls: ['CC6.1 Logical Access Controls', 'CC6.6 Network Boundary Protections', 'CC7.1 Vulnerability Detection', 'CC8.1 Change Management']
-                },
-                {
-                  key: 'gdpr_art_32',
-                  title: 'GDPR Article 32',
-                  full_name: 'Security of Processing Personal Data',
-                  badge: 'EU Regulation',
-                  clause_count: 18,
-                  description: 'Mandates technical and organizational measures to ensure data protection, pseudonymization, encryption, and regular security testing.',
-                  key_controls: ['Art. 32(1)(a) Encryption & Pseudonymisation', 'Art. 32(1)(b) Confidentiality & Integrity', 'Art. 32(1)(d) Regular Security Testing']
-                },
-                {
-                  key: 'nist_csf_2',
-                  title: 'NIST CSF 2.0',
-                  full_name: 'NIST Cybersecurity Framework 2.0',
-                  badge: 'Federal Framework',
-                  clause_count: 106,
-                  description: 'Comprehensive guidelines across Govern, Identify, Protect, Detect, Respond, and Recover to manage cybersecurity risks.',
-                  key_controls: ['GV.OC-01 Organizational Context', 'PR.AA-01 Identity & Access', 'DE.CM-01 Continuous Monitoring', 'RS.MA-01 Incident Execution']
-                }
-              ]).map(std => (
-                <div key={std.key} className="standard-card">
-                  <div>
-                    <div className="standard-card-header">
-                      <div>
-                        <div className="standard-card-title">{std.title}</div>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: '2px' }}>{std.full_name}</div>
-                      </div>
-                      <span className="standard-badge">{std.badge || 'Standard'}</span>
-                    </div>
-
-                    <p className="standard-card-desc" style={{ marginTop: '12px' }}>
-                      {std.description}
-                    </p>
-
-                    <div style={{ marginTop: '14px' }}>
-                      <div style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-                        Key Controls Included:
-                      </div>
-                      <div className="standard-controls-list">
-                        {(std.key_controls || []).map((ctrl, i) => (
-                          <span key={i} className="standard-control-pill">{ctrl}</span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)' }}>
-                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                      {std.clause_count || 50}+ Regulatory Controls
-                    </span>
-                    <button 
-                      className="btn btn-primary" 
-                      style={{ padding: '6px 14px', fontSize: '0.78rem' }}
-                      onClick={() => {
-                        setStudioStandardKey(std.key);
-                        setActiveTab('studio');
-                      }}
-                    >
-                      Audit With This Standard →
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-          </div>
-        )}
-
-        {/* =========================================================================
-            VIEW 5: COMPLIANCE DIFF & BENCHMARKING
-            ========================================================================= */}
-        {activeTab === 'diff' && (
-          <div className="diff-container" style={{ maxWidth: '1200px', margin: '0 auto' }}>
-            
-            <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
-              <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                🔀 Compliance Diff & Historical Benchmarking
-              </h2>
-              <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                Compare two audit runs to evaluate remediation progress, track resolved compliance gaps, and catch regressions.
-              </p>
-            </div>
-
-            {/* Audit Selection Row */}
-            <div className="diff-selectors-row">
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">Baseline Audit (Before)</label>
-                <select 
-                  className="form-input" 
-                  value={diffBaselineId} 
-                  onChange={e => setDiffBaselineId(e.target.value)}
-                >
-                  <option value="">Select Baseline Run...</option>
-                  {pastAudits.map(a => (
-                    <option key={a.audit_id} value={a.audit_id}>
-                      {a.audit_id} - {a.standard_name} ({a.compliance_pct}%) [{a.timestamp}]
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div style={{ fontSize: '1.5rem', color: 'var(--accent-cyan-light)', marginTop: '20px' }}>
-                ➔
-              </div>
-
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">Target Audit (After)</label>
-                <select 
-                  className="form-input" 
-                  value={diffTargetId} 
-                  onChange={e => setDiffTargetId(e.target.value)}
-                >
-                  <option value="">Select Target Run...</option>
-                  {pastAudits.map(a => (
-                    <option key={a.audit_id} value={a.audit_id}>
-                      {a.audit_id} - {a.standard_name} ({a.compliance_pct}%) [{a.timestamp}]
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <button 
-                className="btn btn-primary" 
-                style={{ height: '42px', marginTop: '24px', padding: '0 20px' }}
-                onClick={runDiffComparison}
-                disabled={isDiffLoading}
-              >
-                {isDiffLoading ? 'Comparing...' : 'Run Diff Analysis'}
-              </button>
-            </div>
-
-            {/* Diff Results Display */}
-            {diffResult ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                
-                {/* Metric Delta Cards */}
-                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                  <div className="diff-stat-card">
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Posture Delta</div>
-                    <div className="diff-stat-val" style={{ color: diffResult.score_delta >= 0 ? 'var(--status-compliant)' : 'var(--status-non-compliant)' }}>
-                      {diffResult.score_delta >= 0 ? `+${diffResult.score_delta}%` : `${diffResult.score_delta}%`}
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      {diffResult.baseline_score}% ➔ {diffResult.target_score}%
-                    </div>
-                  </div>
-
-                  <div className="diff-stat-card">
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Resolved Gaps</div>
-                    <div className="diff-stat-val" style={{ color: 'var(--status-compliant)' }}>
-                      {diffResult.resolved_gaps_count}
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Successfully Remediated</div>
-                  </div>
-
-                  <div className="diff-stat-card">
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>New Gaps</div>
-                    <div className="diff-stat-val" style={{ color: 'var(--status-non-compliant)' }}>
-                      {diffResult.new_gaps_count}
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Requires Attention</div>
-                  </div>
-
-                  <div className="diff-stat-card">
-                    <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Unchanged Controls</div>
-                    <div className="diff-stat-val" style={{ color: 'var(--accent-cyan-light)' }}>
-                      {diffResult.unchanged_count}
-                    </div>
-                    <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>Stable Alignment</div>
-                  </div>
-                </div>
-
-                {/* Resolved Gaps List */}
-                {diffResult.resolved_gaps?.length > 0 && (
-                  <div style={{ background: 'var(--bg-card)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '12px', padding: '20px' }}>
-                    <h4 style={{ color: 'var(--status-compliant)', fontSize: '0.95rem', fontWeight: 700, marginBottom: '10px' }}>
-                      🎉 Resolved Gaps ({diffResult.resolved_gaps.length})
-                    </h4>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {diffResult.resolved_gaps.map((item, i) => (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.84rem' }}>
-                          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{item.clause_id}: {item.title}</span>
-                          <span className="badge badge-compliant">Improved: {item.old_status} ➔ {item.new_status}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* New Regressions List */}
-                {diffResult.new_gaps?.length > 0 && (
-                  <div style={{ background: 'var(--bg-card)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '12px', padding: '20px' }}>
-                    <h4 style={{ color: 'var(--status-non-compliant)', fontSize: '0.95rem', fontWeight: 700, marginBottom: '10px' }}>
-                      ⚠️ Newly Introduced Gaps ({diffResult.new_gaps.length})
-                    </h4>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {diffResult.new_gaps.map((item, i) => (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.84rem' }}>
-                          <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>{item.clause_id}: {item.title}</span>
-                          <span className="badge badge-non-compliant">Regressed: {item.new_status}</span>
-                        </div>
-                      ))}
-                    </div>
+                    Select baseline and target runs above and click <strong>Run Diff Analysis</strong> to see progression.
                   </div>
                 )}
 
               </div>
-            ) : (
-              <div style={{ color: 'var(--text-dim)', textAlign: 'center', padding: '60px 0' }}>
-                Select baseline and target runs above and click <strong>Run Diff Analysis</strong> to see progression.
-              </div>
-            )}
+            </div>
+          )}
 
-          </div>
-        )}
-
-        {/* =========================================================================
+          {/* =========================================================================
             VIEW 6: REPORTS & EXPORT CENTER
             ========================================================================= */}
-        {activeTab === 'exports' && (
-          <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-            
-            <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                    📥 Reports & Governance Export Center
-                  </h2>
-                  <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    One-click export tools for executive distributions, engineering task trackers, and compliance archives.
-                  </p>
+          {activeTab === 'exports' && (
+            <div className="view-container">
+
+              <div style={{ borderBottom: '1px solid var(--border-subtle)', paddingBottom: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h2 style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                      📥 Reports & Governance Export Center
+                    </h2>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      One-click export tools for executive distributions, engineering task trackers, and compliance archives.
+                    </p>
+                  </div>
+                  <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', padding: '6px 14px', fontSize: '0.8rem' }}>
+                    Target: {report?.audit_id}
+                  </span>
                 </div>
-                <span className="badge" style={{ background: 'var(--bg-card)', color: 'var(--accent-cyan-light)', padding: '6px 14px', fontSize: '0.8rem' }}>
-                  Target: {report?.audit_id}
+              </div>
+
+              <div className="export-grid">
+
+                {/* PDF Export Card */}
+                <div className="export-card">
+                  <div>
+                    <div className="export-card-icon">📄</div>
+                    <div className="export-card-title">Executive PDF Report</div>
+                    <div className="export-card-desc">
+                      Publication-ready executive compliance report with SHA-256 cryptographic seal, executive summaries, and clause finding breakdowns.
+                    </div>
+                  </div>
+                  <button className="btn btn-primary" onClick={() => triggerDownload('pdf')}>
+                    Download Sealed PDF
+                  </button>
+                </div>
+
+                {/* Jira / Linear Tasks CSV */}
+                <div className="export-card">
+                  <div>
+                    <div className="export-card-icon">🎯</div>
+                    <div className="export-card-title">Jira / Linear Tasks CSV</div>
+                    <div className="export-card-desc">
+                      Actionable CSV file formatted for direct import into Jira, Linear, or Asana with severity, remediation owners, and fix steps.
+                    </div>
+                  </div>
+                  <button className="btn btn-secondary" onClick={() => triggerDownload('tasks')}>
+                    Download Jira Tasks CSV
+                  </button>
+                </div>
+
+                {/* Compliance Matrix CSV */}
+                <div className="export-card">
+                  <div>
+                    <div className="export-card-icon">📊</div>
+                    <div className="export-card-title">Compliance Matrix CSV</div>
+                    <div className="export-card-desc">
+                      Full spreadsheet export containing all audited clauses, citations, found evidence text, risk ratings, and compliance statuses.
+                    </div>
+                  </div>
+                  <button className="btn btn-secondary" onClick={() => triggerDownload('csv')}>
+                    Download Full Matrix CSV
+                  </button>
+                </div>
+
+                {/* Markdown Wiki Export */}
+                <div className="export-card">
+                  <div>
+                    <div className="export-card-icon">📝</div>
+                    <div className="export-card-title">Executive Markdown</div>
+                    <div className="export-card-desc">
+                      Clean GitHub-flavored markdown document with formatted tables and quotes, suitable for internal documentation wikis.
+                    </div>
+                  </div>
+                  <button className="btn btn-secondary" onClick={() => triggerDownload('markdown')}>
+                    Download Markdown (.md)
+                  </button>
+                </div>
+
+              </div>
+
+              {/* Cryptographic Verification Seal Box */}
+              <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', borderRadius: '14px', padding: '20px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span>🔒</span> Cryptographic Audit Trail Assurance
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    All PDF reports generated by AegisAudit AI incorporate an SHA-256 audit digest to ensure immutable chain-of-custody.
+                  </div>
+                </div>
+                <span className="badge badge-compliant" style={{ fontFamily: 'var(--font-mono)' }}>
+                  SHA-256 VERIFIED
                 </span>
               </div>
-            </div>
-
-            <div className="export-grid">
-              
-              {/* PDF Export Card */}
-              <div className="export-card">
-                <div>
-                  <div className="export-card-icon">📄</div>
-                  <div className="export-card-title">Executive PDF Report</div>
-                  <div className="export-card-desc">
-                    Publication-ready executive compliance report with SHA-256 cryptographic seal, executive summaries, and clause finding breakdowns.
-                  </div>
-                </div>
-                <button className="btn btn-primary" onClick={() => triggerDownload('pdf')}>
-                  Download Sealed PDF
-                </button>
-              </div>
-
-              {/* Jira / Linear Tasks CSV */}
-              <div className="export-card">
-                <div>
-                  <div className="export-card-icon">🎯</div>
-                  <div className="export-card-title">Jira / Linear Tasks CSV</div>
-                  <div className="export-card-desc">
-                    Actionable CSV file formatted for direct import into Jira, Linear, or Asana with severity, remediation owners, and fix steps.
-                  </div>
-                </div>
-                <button className="btn btn-secondary" onClick={() => triggerDownload('tasks')}>
-                  Download Jira Tasks CSV
-                </button>
-              </div>
-
-              {/* Compliance Matrix CSV */}
-              <div className="export-card">
-                <div>
-                  <div className="export-card-icon">📊</div>
-                  <div className="export-card-title">Compliance Matrix CSV</div>
-                  <div className="export-card-desc">
-                    Full spreadsheet export containing all audited clauses, citations, found evidence text, risk ratings, and compliance statuses.
-                  </div>
-                </div>
-                <button className="btn btn-secondary" onClick={() => triggerDownload('csv')}>
-                  Download Full Matrix CSV
-                </button>
-              </div>
-
-              {/* Markdown Wiki Export */}
-              <div className="export-card">
-                <div>
-                  <div className="export-card-icon">📝</div>
-                  <div className="export-card-title">Executive Markdown</div>
-                  <div className="export-card-desc">
-                    Clean GitHub-flavored markdown document with formatted tables and quotes, suitable for internal documentation wikis.
-                  </div>
-                </div>
-                <button className="btn btn-secondary" onClick={() => triggerDownload('markdown')}>
-                  Download Markdown (.md)
-                </button>
-              </div>
 
             </div>
-
-            {/* Cryptographic Verification Seal Box */}
-            <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', borderRadius: '14px', padding: '20px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span>🔒</span> Cryptographic Audit Trail Assurance
-                </div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                  All PDF reports generated by AegisAudit AI incorporate an SHA-256 audit digest to ensure immutable chain-of-custody.
-                </div>
-              </div>
-              <span className="badge badge-compliant" style={{ fontFamily: 'var(--font-mono)' }}>
-                SHA-256 VERIFIED
-              </span>
-            </div>
-
-          </div>
-        )}
+          )}
 
         </main>
       </div>
@@ -1945,25 +2024,25 @@ function App() {
               </h3>
               <button className="btn btn-ghost" onClick={() => setShowAuthModal(false)}>✕</button>
             </div>
-            
+
             <form className="modal-body" onSubmit={authMode === 'login' ? handleLogin : handleRegister}>
               {authMode === 'register' && (
                 <>
                   <div className="form-group">
                     <label className="form-label">Full Name</label>
-                    <input 
-                      type="text" 
-                      className="form-input" 
-                      value={authName} 
-                      onChange={e => setAuthName(e.target.value)} 
-                      required 
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={authName}
+                      onChange={e => setAuthName(e.target.value)}
+                      required
                     />
                   </div>
                   <div className="form-group">
                     <label className="form-label">Organization Role</label>
-                    <select 
-                      className="form-input" 
-                      value={authRole} 
+                    <select
+                      className="form-input"
+                      value={authRole}
                       onChange={e => setAuthRole(e.target.value)}
                     >
                       <option value="admin">Administrator (Full Control)</option>
@@ -1976,35 +2055,35 @@ function App() {
 
               <div className="form-group">
                 <label className="form-label">Work Email</label>
-                <input 
-                  type="email" 
-                  className="form-input" 
-                  value={authEmail} 
-                  onChange={e => setAuthEmail(e.target.value)} 
-                  required 
+                <input
+                  type="email"
+                  className="form-input"
+                  value={authEmail}
+                  onChange={e => setAuthEmail(e.target.value)}
+                  required
                 />
               </div>
 
               <div className="form-group">
                 <label className="form-label">Password</label>
-                <input 
-                  type="password" 
-                  className="form-input" 
-                  value={authPass} 
-                  onChange={e => setAuthPass(e.target.value)} 
-                  required 
+                <input
+                  type="password"
+                  className="form-input"
+                  value={authPass}
+                  onChange={e => setAuthPass(e.target.value)}
+                  required
                 />
               </div>
 
               {/* Demo Helper Pill */}
-              <div 
-                style={{ 
-                  background: 'var(--bg-card)', 
-                  border: '1px solid var(--border-subtle)', 
-                  borderRadius: '8px', 
-                  padding: '10px 14px', 
-                  fontSize: '0.78rem', 
-                  color: 'var(--accent-cyan-light)', 
+              <div
+                style={{
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '8px',
+                  padding: '10px 14px',
+                  fontSize: '0.78rem',
+                  color: 'var(--accent-cyan-light)',
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
@@ -2020,9 +2099,9 @@ function App() {
                 <span style={{ fontWeight: 700 }}>Auto-Fill →</span>
               </div>
 
-              <button 
-                type="submit" 
-                className="btn btn-primary" 
+              <button
+                type="submit"
+                className="btn btn-primary"
                 style={{ width: '100%', justifyContent: 'center', marginTop: '6px' }}
               >
                 {authMode === 'login' ? 'Sign In to Workspace' : 'Create Account & Continue'}

@@ -3,7 +3,7 @@ Authentication and Authorization Dependencies for FastAPI.
 Provides JWT Bearer token validation and Role-Based Access Control (RBAC).
 """
 
-from typing import List
+from typing import List, Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from models.user_schema import UserRole, UserResponse
@@ -52,6 +52,26 @@ def get_current_user(
         )
 
     return user
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
+) -> Optional[UserResponse]:
+    """
+    Extracts Bearer token if present, returns None if omitted or invalid.
+    Enables zero-friction read-only exploration while write endpoints remain secured.
+    """
+    if not credentials or not credentials.credentials:
+        return None
+    try:
+        payload = TokenManager.decode_access_token(credentials.credentials)
+        if not payload:
+            return None
+        user_id = payload.get("sub") or payload.get("id")
+        if not user_id:
+            return None
+        return user_db.get_user_by_id(user_id)
+    except Exception:
+        return None
 
 def require_roles(allowed_roles: List[UserRole]):
     """

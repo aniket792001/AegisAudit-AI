@@ -161,22 +161,37 @@ class JobManager:
         return self.jobs.get(job_id)
 
     def stream_job_events(self, job_id: str) -> Generator[str, None, None]:
-        """Yields Server-Sent Events (SSE) for real-time frontend streaming."""
+        """Yields Server-Sent Events (SSE) for real-time frontend streaming with reconnect resilience."""
+        job = self.jobs.get(job_id)
+        if not job:
+            yield 'data: {"error": "Job not found"}\n\n'
+            return
+
         ev_q = self.event_queues.get(job_id)
         if not ev_q:
-            yield "data: {\"error\": \"Job not found\"}\n\n"
+            if job.status == AuditJobStatus.COMPLETED:
+                yield 'data: {"agent_name": "System", "message": "Audit completed.", "progress_pct": 100.0}\n\n'
+                yield 'event: end\ndata: {"message": "Stream completed"}\n\n'
+            elif job.status == AuditJobStatus.FAILED:
+                yield f'data: {{"agent_name": "System", "message": "Job failed: {job.error}", "progress_pct": 100.0}}\n\n'
+                yield 'event: end\ndata: {"message": "Stream completed"}\n\n'
+            else:
+                yield 'data: {"error": "Event stream queue not available"}\n\n'
             return
 
         while True:
             try:
-                event: Optional[AgentLogEvent] = ev_q.get(timeout=30)
+                event: Optional[AgentLogEvent] = ev_q.get(timeout=2)
                 if event is None:
-                    # Stream complete
+                    # Stream complete sentinel
                     yield "event: end\ndata: {\"message\": \"Stream completed\"}\n\n"
                     break
                 yield f"data: {event.model_dump_json()}\n\n"
             except queue.Empty:
-                # Keep alive ping
+                if job.status in (AuditJobStatus.COMPLETED, AuditJobStatus.FAILED):
+                    yield "event: end\ndata: {\"message\": \"Stream completed\"}\n\n"
+                    break
+                # Keep-alive heartbeat ping
                 yield "event: ping\ndata: {}\n\n"
 
 job_manager = JobManager()

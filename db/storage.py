@@ -17,8 +17,15 @@ class AuditDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """Returns hardened SQLite connection with WAL mode and concurrency resilience."""
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS audit_runs (
@@ -42,7 +49,7 @@ class AuditDatabase:
             conn.commit()
 
     def save_report(self, report: FullAuditReport):
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO audit_runs (
@@ -64,7 +71,7 @@ class AuditDatabase:
             logger.info(f"AuditDatabase: Saved audit report {report.audit_id}")
 
     def list_audits(self) -> List[Dict[str, Any]]:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT audit_id, standard_name, policy_name, timestamp, compliance_pct, total_clauses,
@@ -87,7 +94,7 @@ class AuditDatabase:
             ]
 
     def get_report(self, audit_id: str) -> Optional[FullAuditReport]:
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT report_json FROM audit_runs WHERE audit_id = ?", (audit_id,))
             row = cursor.fetchone()
@@ -98,7 +105,7 @@ class AuditDatabase:
 
     def delete_audit(self, audit_id: str) -> bool:
         """Deletes an audit report by ID from SQLite database."""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM audit_runs WHERE audit_id = ?", (audit_id,))
             conn.commit()

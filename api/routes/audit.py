@@ -18,9 +18,10 @@ from agents.orchestrator import AuditOrchestrator
 from db.storage import AuditDatabase
 from core.config import settings
 from core.job_manager import job_manager
-from api.deps import get_current_user, require_roles
+from api.deps import get_current_user, get_optional_user, require_roles
 from rag.standards_catalog import StandardsCatalogService
 from utils.report_exporter import ReportExporter
+from utils.risk_scorer import RiskScorer
 
 router = APIRouter(prefix="/api/audit", tags=["Audit"])
 db = AuditDatabase()
@@ -119,7 +120,7 @@ def submit_async_audit_job(
     return job_manager.get_job(job_id)
 
 @router.get("/jobs/{job_id}/status", response_model=AuditJobResponse)
-def get_job_status(job_id: str, current_user: UserResponse = Depends(get_current_user)):
+def get_job_status(job_id: str, current_user: Optional[UserResponse] = Depends(get_optional_user)):
     """Polls the progress status of an asynchronous audit job."""
     job = job_manager.get_job(job_id)
     if not job:
@@ -140,13 +141,13 @@ def stream_job_agent_events(job_id: str):
 
 # --- AUDIT HISTORY & REPORTS ---
 @router.get("/history", response_model=List[Dict[str, Any]])
-def get_audit_history(current_user: UserResponse = Depends(get_current_user)):
-    """Retrieves metadata of all past compliance audits. Requires authenticated user."""
+def get_audit_history(current_user: Optional[UserResponse] = Depends(get_optional_user)):
+    """Retrieves metadata of all past compliance audits."""
     return db.list_audits()
 
 @router.get("/{audit_id}", response_model=FullAuditReport)
-def get_audit_report(audit_id: str, current_user: UserResponse = Depends(get_current_user)):
-    """Retrieves a full audit report by ID. Requires authenticated user."""
+def get_audit_report(audit_id: str, current_user: Optional[UserResponse] = Depends(get_optional_user)):
+    """Retrieves a full audit report by ID."""
     report = db.get_report(audit_id)
     if not report:
         raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
@@ -197,25 +198,34 @@ def review_audit_finding(
     if not found:
         raise HTTPException(status_code=404, detail=f"Clause {req.clause_id} not found in audit {audit_id}")
 
-    # Recalculate summary metrics
+    # Recalculate summary metrics with mathematically sound weighting
     total = len(report.findings)
     compliant = sum(1 for f in report.findings if getattr(f.status, "value", f.status) == "Compliant")
     partial = sum(1 for f in report.findings if getattr(f.status, "value", f.status) == "Partially Compliant")
     non_compliant = sum(1 for f in report.findings if getattr(f.status, "value", f.status) == "Non-Compliant")
 
+    metrics = RiskScorer.calculate_metrics(report.findings)
+
     report.summary.total_clauses_audited = total
     report.summary.compliant_count = compliant
     report.summary.partially_compliant_count = partial
     report.summary.non_compliant_count = non_compliant
-    if total > 0:
-        report.summary.overall_compliance_percentage = round((compliant / total) * 100.0, 1)
+    report.summary.overall_compliance_percentage = metrics["score"]
+
+    # Update risk breakdown
+    risk_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    for f in report.findings:
+        rl = getattr(f.risk_level, "value", f.risk_level)
+        if rl in risk_counts:
+            risk_counts[rl] += 1
+    report.summary.risk_breakdown = risk_counts
 
     db.save_report(report)
     return report
 
 # --- COMPLIANCE DIFF & BENCHMARKING ---
 @router.post("/compare")
-def compare_audits(req: CompareAuditsRequest, current_user: UserResponse = Depends(get_current_user)):
+def compare_audits(req: CompareAuditsRequest, current_user: Optional[UserResponse] = Depends(get_optional_user)):
     """Computes delta and gap transitions between two audit runs."""
     r1 = db.get_report(req.audit_id_1)
     r2 = db.get_report(req.audit_id_2)

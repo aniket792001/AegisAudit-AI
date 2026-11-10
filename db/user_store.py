@@ -20,8 +20,15 @@ class UserDatabase:
         self._init_db()
         self._seed_default_admin()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """Returns hardened SQLite connection with WAL mode and concurrency resilience."""
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
     def _init_db(self):
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -60,7 +67,7 @@ class UserDatabase:
         hashed_pw = PasswordHasher.hash_password(password)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO users (id, email, full_name, hashed_password, role, is_active, created_at)
@@ -80,7 +87,7 @@ class UserDatabase:
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Retrieves raw user record including hashed password."""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, email, full_name, hashed_password, role, is_active, created_at
@@ -101,7 +108,7 @@ class UserDatabase:
 
     def get_user_by_id(self, user_id: str) -> Optional[UserResponse]:
         """Retrieves sanitized user response model by user ID."""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, email, full_name, role, is_active, created_at
@@ -121,7 +128,7 @@ class UserDatabase:
 
     def list_users(self) -> List[UserResponse]:
         """Lists all registered users."""
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, email, full_name, role, is_active, created_at
